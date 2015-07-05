@@ -1,5 +1,5 @@
 From 5f18c1e2c4301706c2ed4761e80c73b4cbe501d2 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Wed, 24 Jun 2015 21:17:57 +0300
 Subject: [PATCH 05/22] xen: Rename mem_event to vm_event
 

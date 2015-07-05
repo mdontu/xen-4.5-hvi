@@ -1,5 +1,5 @@
 From 443c761289face51fec20e91756fae59fc65b99f Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+From: Mihai Dontu <mdontu@bitdefender.com>
 Date: Wed, 24 Jun 2015 20:35:51 +0300
 Subject: [PATCH 01/22] fixed two build issues with glibc 2.20 / gcc 4.9
 MIME-Version: 1.0
