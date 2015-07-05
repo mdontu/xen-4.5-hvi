@@ -1,0 +1,741 @@
+From fb97c9b62d3cfcbc3b5f19686612062d2f54ac27 Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Date: Thu, 9 Apr 2015 16:32:50 +0200
+Subject: [PATCH 10/22] xen/vm_event: Decouple vm_event and mem_access.
+
+The vm_event subsystem has been artifically tied to the presence of mem_access.
+While mem_access does depend on vm_event, vm_event is an entirely independent
+subsystem that can be used for arbitrary function-offloading to helper apps in
+domains. This patch removes the dependency that mem_access needs to be supported
+in order to enable vm_event.
+
+A new vm_event_resume function is introduced which pulls all responses off from
+given ring and delegates handling to appropriate helper functions (if
+necessary). By default, vm_event_resume just pulls the response from the ring
+and unpauses the corresponding vCPU. This approach reduces code duplication
+and present a single point of entry for the entire vm_event subsystem's
+response handling mechanism.
+
+Signed-off-by: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Acked-by: Daniel De Graaf <dgdegra@tycho.nsa.gov>
+Acked-by: Tim Deegan <tim@xen.org>
+---
+ xen/arch/x86/mm/mem_sharing.c       | 32 ++---------------
+ xen/arch/x86/mm/p2m.c               | 62 ++++++++++++--------------------
+ xen/common/Makefile                 | 18 +++++-----
+ xen/common/mem_access.c             | 31 +---------------
+ xen/common/vm_event.c               | 72 +++++++++++++++++++++++++++++++------
+ xen/include/asm-x86/mem_sharing.h   |  1 -
+ xen/include/asm-x86/p2m.h           |  2 +-
+ xen/include/xen/mem_access.h        | 14 ++++++--
+ xen/include/xen/vm_event.h          | 58 ++----------------------------
+ xen/include/xsm/dummy.h             |  2 --
+ xen/include/xsm/xsm.h               |  4 ---
+ xen/xsm/dummy.c                     |  2 --
+ xen/xsm/flask/hooks.c               | 36 ++++++++-----------
+ xen/xsm/flask/policy/access_vectors |  8 ++---
+ 14 files changed, 128 insertions(+), 214 deletions(-)
+
+diff --git a/xen/arch/x86/mm/mem_sharing.c b/xen/arch/x86/mm/mem_sharing.c
+index e6572af..4959407 100644
+--- a/xen/arch/x86/mm/mem_sharing.c
++++ b/xen/arch/x86/mm/mem_sharing.c
+@@ -591,35 +591,6 @@ unsigned int mem_sharing_get_nr_shared_mfns(void)
+     return (unsigned int)atomic_read(&nr_shared_mfns);
+ }
+ 
+-int mem_sharing_sharing_resume(struct domain *d)
+-{
+-    vm_event_response_t rsp;
+-
+-    /* Get all requests off the ring */
+-    while ( vm_event_get_response(d, &d->vm_event->share, &rsp) )
+-    {
+-        struct vcpu *v;
+-
+-        if ( rsp.version != VM_EVENT_INTERFACE_VERSION )
+-        {
+-            printk(XENLOG_G_WARNING "vm_event interface version mismatch\n");
+-            continue;
+-        }
+-
+-        /* Validate the vcpu_id in the response. */
+-        if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
+-            continue;
+-
+-        v = d->vcpu[rsp.vcpu_id];
+-
+-        /* Unpause domain/vcpu */
+-        if ( rsp.flags & VM_EVENT_FLAG_VCPU_PAUSED )
+-            vm_event_vcpu_unpause(v);
+-    }
+-
+-    return 0;
+-}
+-
+ /* Functions that change a page's type and ownership */
+ static int page_make_sharable(struct domain *d, 
+                        struct page_info *page, 
+@@ -1470,7 +1441,8 @@ int mem_sharing_memop(struct domain *d, xen_mem_sharing_op_t *mec)
+         {
+             if ( !mem_sharing_enabled(d) )
+                 return -EINVAL;
+-            rc = mem_sharing_sharing_resume(d);
++
++            vm_event_resume(d, &d->vm_event->share);
+         }
+         break;
+ 
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index 9a48b21..b471e0d 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1275,13 +1275,13 @@ int p2m_mem_paging_prep(struct domain *d, unsigned long gfn, uint64_t buffer)
+ }
+ 
+ /**
+- * p2m_mem_paging_resume - Resume guest gfn and vcpus
++ * p2m_mem_paging_resume - Resume guest gfn
+  * @d: guest domain
+- * @gfn: guest page in paging state
++ * @rsp: vm_event response received
++ *
++ * p2m_mem_paging_resume() will forward the p2mt of a gfn to ram_rw. It is
++ * called by the pager.
+  *
+- * p2m_mem_paging_resume() will forward the p2mt of a gfn to ram_rw and all
+- * waiting vcpus will be unpaused again. It is called by the pager.
+- * 
+  * The gfn was previously either evicted and populated, or nominated and
+  * populated. If the page was evicted the p2mt will be p2m_ram_paging_in. If
+  * the page was just nominated the p2mt will be p2m_ram_paging_in_start because
+@@ -1289,51 +1289,33 @@ int p2m_mem_paging_prep(struct domain *d, unsigned long gfn, uint64_t buffer)
+  *
+  * If the gfn was dropped the vcpu needs to be unpaused.
+  */
+-void p2m_mem_paging_resume(struct domain *d)
++
++void p2m_mem_paging_resume(struct domain *d, vm_event_response_t *rsp)
+ {
+     struct p2m_domain *p2m = p2m_get_hostp2m(d);
+-    vm_event_response_t rsp;
+     p2m_type_t p2mt;
+     p2m_access_t a;
+     mfn_t mfn;
+ 
+-    /* Pull all responses off the ring */
+-    while( vm_event_get_response(d, &d->vm_event->paging, &rsp) )
++    /* Fix p2m entry if the page was not dropped */
++    if ( !(rsp->u.mem_paging.flags & MEM_PAGING_DROP_PAGE) )
+     {
+-        struct vcpu *v;
+-
+-        if ( rsp.version != VM_EVENT_INTERFACE_VERSION )
+-        {
+-            printk(XENLOG_G_WARNING "vm_event interface version mismatch\n");
+-            continue;
+-        }
+-
+-        /* Validate the vcpu_id in the response. */
+-        if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
+-            continue;
++        unsigned long gfn = rsp->u.mem_access.gfn;
+ 
+-        v = d->vcpu[rsp.vcpu_id];
+-
+-        /* Fix p2m entry if the page was not dropped */
+-        if ( !(rsp.u.mem_paging.flags & MEM_PAGING_DROP_PAGE) )
++        gfn_lock(p2m, gfn, 0);
++        mfn = p2m->get_entry(p2m, gfn, &p2mt, &a, 0, NULL);
++        /*
++         * Allow only pages which were prepared properly, or pages which
++         * were nominated but not evicted.
++         */
++        if ( mfn_valid(mfn) && (p2mt == p2m_ram_paging_in) )
+         {
+-            unsigned long gfn = rsp.u.mem_access.gfn;
+-            gfn_lock(p2m, gfn, 0);
+-            mfn = p2m->get_entry(p2m, gfn, &p2mt, &a, 0, NULL);
+-            /* Allow only pages which were prepared properly, or pages which
+-             * were nominated but not evicted */
+-            if ( mfn_valid(mfn) && (p2mt == p2m_ram_paging_in) )
+-            {
+-                p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K,
+-                              paging_mode_log_dirty(d) ? p2m_ram_logdirty :
+-                              p2m_ram_rw, a);
+-                set_gpfn_from_mfn(mfn_x(mfn), gfn);
+-            }
+-            gfn_unlock(p2m, gfn, 0);
++            p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K,
++                          paging_mode_log_dirty(d) ? p2m_ram_logdirty :
++                          p2m_ram_rw, a);
++            set_gpfn_from_mfn(mfn_x(mfn), gfn);
+         }
+-        /* Unpause domain */
+-        if ( rsp.flags & VM_EVENT_FLAG_VCPU_PAUSED )
+-            vm_event_vcpu_unpause(v);
++        gfn_unlock(p2m, gfn, 0);
+     }
+ }
+ 
+diff --git a/xen/common/Makefile b/xen/common/Makefile
+index f1b73a3..9db7524 100644
+--- a/xen/common/Makefile
++++ b/xen/common/Makefile
+@@ -15,13 +15,19 @@ obj-y += keyhandler.o
+ obj-$(HAS_KEXEC) += kexec.o
+ obj-$(HAS_KEXEC) += kimage.o
+ obj-y += lib.o
++obj-y += lzo.o
++obj-$(HAS_MEM_ACCESS) += mem_access.o
+ obj-y += memory.o
+ obj-y += multicall.o
+ obj-y += notifier.o
+ obj-y += page_alloc.o
++obj-$(HAS_PDX) += pdx.o
+ obj-y += preempt.o
+ obj-y += random.o
+ obj-y += rangeset.o
++obj-y += radix-tree.o
++obj-y += rbtree.o
++obj-y += rcupdate.o
+ obj-y += sched_credit.o
+ obj-y += sched_credit2.o
+ obj-y += sched_sedf.o
+@@ -40,21 +46,15 @@ obj-y += sysctl.o
+ obj-y += tasklet.o
+ obj-y += time.o
+ obj-y += timer.o
++obj-y += tmem.o
++obj-y += tmem_xen.o
+ obj-y += trace.o
+ obj-y += version.o
++obj-y += vm_event.o
+ obj-y += vmap.o
+ obj-y += vsprintf.o
+ obj-y += wait.o
+ obj-y += xmalloc_tlsf.o
+-obj-y += rcupdate.o
+-obj-y += tmem.o
+-obj-y += tmem_xen.o
+-obj-y += radix-tree.o
+-obj-y += rbtree.o
+-obj-y += lzo.o
+-obj-$(HAS_PDX) += pdx.o
+-obj-$(HAS_MEM_ACCESS) += mem_access.o
+-obj-$(HAS_MEM_ACCESS) += vm_event.o
+ 
+ obj-bin-$(CONFIG_X86) += $(foreach n,decompress bunzip2 unxz unlzma unlzo unlz4 earlycpio,$(n).init.o)
+ 
+diff --git a/xen/common/mem_access.c b/xen/common/mem_access.c
+index 7ed8a4e..511c8c5 100644
+--- a/xen/common/mem_access.c
++++ b/xen/common/mem_access.c
+@@ -29,35 +29,6 @@
+ #include <asm/p2m.h>
+ #include <xsm/xsm.h>
+ 
+-void mem_access_resume(struct domain *d)
+-{
+-    vm_event_response_t rsp;
+-
+-    /* Pull all responses off the ring. */
+-    while ( vm_event_get_response(d, &d->vm_event->monitor, &rsp) )
+-    {
+-        struct vcpu *v;
+-
+-        if ( rsp.version != VM_EVENT_INTERFACE_VERSION )
+-        {
+-            printk(XENLOG_G_WARNING "vm_event interface version mismatch\n");
+-            continue;
+-        }
+-
+-        /* Validate the vcpu_id in the response. */
+-        if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
+-            continue;
+-
+-        v = d->vcpu[rsp.vcpu_id];
+-
+-        p2m_mem_access_emulate_check(v, &rsp);
+-
+-        /* Unpause domain. */
+-        if ( rsp.flags & VM_EVENT_FLAG_VCPU_PAUSED )
+-            vm_event_vcpu_unpause(v);
+-    }
+-}
+-
+ int mem_access_memop(unsigned long cmd,
+                      XEN_GUEST_HANDLE_PARAM(xen_mem_access_op_t) arg)
+ {
+@@ -92,7 +63,7 @@ int mem_access_memop(unsigned long cmd,
+             rc = -ENOSYS;
+         else
+         {
+-            mem_access_resume(d);
++            vm_event_resume(d, &d->vm_event->monitor);
+             rc = 0;
+         }
+         break;
+diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
+index 348fad2..6d40366 100644
+--- a/xen/common/vm_event.c
++++ b/xen/common/vm_event.c
+@@ -358,6 +358,62 @@ int vm_event_get_response(struct domain *d, struct vm_event_domain *med, vm_even
+     return 1;
+ }
+ 
++/*
++ * Pull all responses from the given ring and unpause the corresponding vCPU
++ * if required. Based on the response type, here we can also call custom
++ * handlers.
++ *
++ * Note: responses are handled the same way regardless of which ring they
++ * arrive on.
++ */
++void vm_event_resume(struct domain *d, struct vm_event_domain *ved)
++{
++    vm_event_response_t rsp;
++
++    /* Pull all responses off the ring. */
++    while ( vm_event_get_response(d, ved, &rsp) )
++    {
++        struct vcpu *v;
++
++        if ( rsp.version != VM_EVENT_INTERFACE_VERSION )
++        {
++            printk(XENLOG_G_WARNING "vm_event interface version mismatch\n");
++            continue;
++        }
++
++        /* Validate the vcpu_id in the response. */
++        if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
++            continue;
++
++        v = d->vcpu[rsp.vcpu_id];
++
++        /*
++         * In some cases the response type needs extra handling, so here
++         * we call the appropriate handlers.
++         */
++        switch ( rsp.reason )
++        {
++
++#ifdef HAS_MEM_ACCESS
++        case VM_EVENT_REASON_MEM_ACCESS:
++            mem_access_resume(v, &rsp);
++            break;
++#endif
++
++#ifdef HAS_MEM_PAGING
++        case VM_EVENT_REASON_MEM_PAGING:
++            p2m_mem_paging_resume(d, &rsp);
++            break;
++#endif
++
++        };
++
++        /* Unpause domain. */
++        if ( rsp.flags & VM_EVENT_FLAG_VCPU_PAUSED )
++            vm_event_vcpu_unpause(v);
++    }
++}
++
+ void vm_event_cancel_slot(struct domain *d, struct vm_event_domain *med)
+ {
+     vm_event_ring_lock(med);
+@@ -437,25 +493,23 @@ int __vm_event_claim_slot(struct domain *d, struct vm_event_domain *med,
+ static void mem_paging_notification(struct vcpu *v, unsigned int port)
+ {
+     if ( likely(v->domain->vm_event->paging.ring_page != NULL) )
+-        p2m_mem_paging_resume(v->domain);
++        vm_event_resume(v->domain, &v->domain->vm_event->paging);
+ }
+ #endif
+ 
+-#ifdef HAS_MEM_ACCESS
+ /* Registered with Xen-bound event channel for incoming notifications. */
+-static void mem_access_notification(struct vcpu *v, unsigned int port)
++static void monitor_notification(struct vcpu *v, unsigned int port)
+ {
+     if ( likely(v->domain->vm_event->monitor.ring_page != NULL) )
+-        mem_access_resume(v->domain);
++        vm_event_resume(v->domain, &v->domain->vm_event->monitor);
+ }
+-#endif
+ 
+ #ifdef HAS_MEM_SHARING
+ /* Registered with Xen-bound event channel for incoming notifications. */
+ static void mem_sharing_notification(struct vcpu *v, unsigned int port)
+ {
+     if ( likely(v->domain->vm_event->share.ring_page != NULL) )
+-        mem_sharing_sharing_resume(v->domain);
++        vm_event_resume(v->domain, &v->domain->vm_event->share);
+ }
+ #endif
+ 
+@@ -510,13 +564,11 @@ void vm_event_cleanup(struct domain *d)
+         (void)vm_event_disable(d, &d->vm_event->paging);
+     }
+ #endif
+-#ifdef HAS_MEM_ACCESS
+     if ( d->vm_event->monitor.ring_page )
+     {
+         destroy_waitqueue_head(&d->vm_event->monitor.wq);
+         (void)vm_event_disable(d, &d->vm_event->monitor);
+     }
+-#endif
+ #ifdef HAS_MEM_SHARING
+     if ( d->vm_event->share.ring_page )
+     {
+@@ -611,7 +663,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+     break;
+ #endif
+ 
+-#ifdef HAS_MEM_ACCESS
+     case XEN_DOMCTL_VM_EVENT_OP_MONITOR:
+     {
+         struct vm_event_domain *med = &d->vm_event->monitor;
+@@ -622,7 +673,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+         case XEN_VM_EVENT_MONITOR_ENABLE:
+             rc = vm_event_enable(d, mec, med, _VPF_mem_access,
+                                     HVM_PARAM_MONITOR_RING_PFN,
+-                                    mem_access_notification);
++                                    monitor_notification);
+             break;
+ 
+         case XEN_VM_EVENT_MONITOR_DISABLE:
+@@ -636,7 +687,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+         }
+     }
+     break;
+-#endif
+ 
+ #ifdef HAS_MEM_SHARING
+     case XEN_DOMCTL_VM_EVENT_OP_SHARING:
+diff --git a/xen/include/asm-x86/mem_sharing.h b/xen/include/asm-x86/mem_sharing.h
+index 2f1f3d2..da99d46 100644
+--- a/xen/include/asm-x86/mem_sharing.h
++++ b/xen/include/asm-x86/mem_sharing.h
+@@ -90,7 +90,6 @@ static inline int mem_sharing_unshare_page(struct domain *d,
+  */
+ int mem_sharing_notify_enomem(struct domain *d, unsigned long gfn,
+                                 bool_t allow_sleep);
+-int mem_sharing_sharing_resume(struct domain *d);
+ int mem_sharing_memop(struct domain *d, 
+                        xen_mem_sharing_op_t *mec);
+ int mem_sharing_domctl(struct domain *d, 
+diff --git a/xen/include/asm-x86/p2m.h b/xen/include/asm-x86/p2m.h
+index 0b000ac..2b3d57d 100644
+--- a/xen/include/asm-x86/p2m.h
++++ b/xen/include/asm-x86/p2m.h
+@@ -563,7 +563,7 @@ void p2m_mem_paging_populate(struct domain *d, unsigned long gfn);
+ /* Prepare the p2m for paging a frame in */
+ int p2m_mem_paging_prep(struct domain *d, unsigned long gfn, uint64_t buffer);
+ /* Resume normal operation (in case a domain was paused) */
+-void p2m_mem_paging_resume(struct domain *d);
++void p2m_mem_paging_resume(struct domain *d, vm_event_response_t *rsp);
+ 
+ /* Send mem event based on the access (gla is -1ull if not available).  Handles
+  * the rw2rx conversion. Boolean return value indicates if access rights have 
+diff --git a/xen/include/xen/mem_access.h b/xen/include/xen/mem_access.h
+index 1d01221..f60b727 100644
+--- a/xen/include/xen/mem_access.h
++++ b/xen/include/xen/mem_access.h
+@@ -24,6 +24,7 @@
+ #define _XEN_ASM_MEM_ACCESS_H
+ 
+ #include <public/memory.h>
++#include <asm/p2m.h>
+ 
+ #ifdef HAS_MEM_ACCESS
+ 
+@@ -31,8 +32,11 @@ int mem_access_memop(unsigned long cmd,
+                      XEN_GUEST_HANDLE_PARAM(xen_mem_access_op_t) arg);
+ int mem_access_send_req(struct domain *d, vm_event_request_t *req);
+ 
+-/* Resumes the running of the VCPU, restarting the last instruction */
+-void mem_access_resume(struct domain *d);
++static inline
++void mem_access_resume(struct vcpu *v, vm_event_response_t *rsp)
++{
++    p2m_mem_access_emulate_check(v, rsp);
++}
+ 
+ #else
+ 
+@@ -49,7 +53,11 @@ int mem_access_send_req(struct domain *d, vm_event_request_t *req)
+     return -ENOSYS;
+ }
+ 
+-static inline void mem_access_resume(struct domain *d) {}
++static inline
++void mem_access_resume(struct vcpu *vcpu, vm_event_response_t *rsp)
++{
++    /* Nothing to do. */
++}
+ 
+ #endif /* HAS_MEM_ACCESS */
+ 
+diff --git a/xen/include/xen/vm_event.h b/xen/include/xen/vm_event.h
+index c6c665d..960beb2 100644
+--- a/xen/include/xen/vm_event.h
++++ b/xen/include/xen/vm_event.h
+@@ -26,8 +26,6 @@
+ 
+ #include <xen/sched.h>
+ 
+-#ifdef HAS_MEM_ACCESS
+-
+ /* Clean up on domain destruction */
+ void vm_event_cleanup(struct domain *d);
+ 
+@@ -69,6 +67,8 @@ void vm_event_put_request(struct domain *d, struct vm_event_domain *ved,
+ int vm_event_get_response(struct domain *d, struct vm_event_domain *ved,
+                           vm_event_response_t *rsp);
+ 
++void vm_event_resume(struct domain *d, struct vm_event_domain *ved);
++
+ int do_vm_event_op(int op, uint32_t domain, void *arg);
+ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *vec,
+                     XEN_GUEST_HANDLE_PARAM(void) u_domctl);
+@@ -76,60 +76,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *vec,
+ void vm_event_vcpu_pause(struct vcpu *v);
+ void vm_event_vcpu_unpause(struct vcpu *v);
+ 
+-#else
+-
+-static inline void vm_event_cleanup(struct domain *d) {}
+-
+-static inline bool_t vm_event_check_ring(struct vm_event_domain *ved)
+-{
+-    return 0;
+-}
+-
+-static inline int vm_event_claim_slot(struct domain *d,
+-                                      struct vm_event_domain *ved)
+-{
+-    return -ENOSYS;
+-}
+-
+-static inline int vm_event_claim_slot_nosleep(struct domain *d,
+-                                              struct vm_event_domain *ved)
+-{
+-    return -ENOSYS;
+-}
+-
+-static inline
+-void vm_event_cancel_slot(struct domain *d, struct vm_event_domain *ved)
+-{}
+-
+-static inline
+-void vm_event_put_request(struct domain *d, struct vm_event_domain *ved,
+-                          vm_event_request_t *req)
+-{}
+-
+-static inline
+-int vm_event_get_response(struct domain *d, struct vm_event_domain *ved,
+-                          vm_event_response_t *rsp)
+-{
+-    return -ENOSYS;
+-}
+-
+-static inline int do_vm_event_op(int op, uint32_t domain, void *arg)
+-{
+-    return -ENOSYS;
+-}
+-
+-static inline
+-int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *vec,
+-                    XEN_GUEST_HANDLE_PARAM(void) u_domctl)
+-{
+-    return -ENOSYS;
+-}
+-
+-static inline void vm_event_vcpu_pause(struct vcpu *v) {}
+-static inline void vm_event_vcpu_unpause(struct vcpu *v) {}
+-
+-#endif /* HAS_MEM_ACCESS */
+-
+ #endif /* __VM_EVENT_H__ */
+ 
+ 
+diff --git a/xen/include/xsm/dummy.h b/xen/include/xsm/dummy.h
+index 4227093..50ee929 100644
+--- a/xen/include/xsm/dummy.h
++++ b/xen/include/xsm/dummy.h
+@@ -513,7 +513,6 @@ static XSM_INLINE int xsm_hvm_param_nested(XSM_DEFAULT_ARG struct domain *d)
+     return xsm_default_action(action, current->domain, d);
+ }
+ 
+-#ifdef HAS_MEM_ACCESS
+ static XSM_INLINE int xsm_vm_event_control(XSM_DEFAULT_ARG struct domain *d, int mode, int op)
+ {
+     XSM_ASSERT_ACTION(XSM_PRIV);
+@@ -525,7 +524,6 @@ static XSM_INLINE int xsm_vm_event_op(XSM_DEFAULT_ARG struct domain *d, int op)
+     XSM_ASSERT_ACTION(XSM_DM_PRIV);
+     return xsm_default_action(action, current->domain, d);
+ }
+-#endif
+ 
+ #ifdef CONFIG_X86
+ static XSM_INLINE int xsm_do_mca(XSM_DEFAULT_VOID)
+diff --git a/xen/include/xsm/xsm.h b/xen/include/xsm/xsm.h
+index cff9d35..d56a68f 100644
+--- a/xen/include/xsm/xsm.h
++++ b/xen/include/xsm/xsm.h
+@@ -141,10 +141,8 @@ struct xsm_operations {
+     int (*hvm_param_nested) (struct domain *d);
+     int (*get_vnumainfo) (struct domain *d);
+ 
+-#ifdef HAS_MEM_ACCESS
+     int (*vm_event_control) (struct domain *d, int mode, int op);
+     int (*vm_event_op) (struct domain *d, int op);
+-#endif
+ 
+ #ifdef CONFIG_X86
+     int (*do_mca) (void);
+@@ -543,7 +541,6 @@ static inline int xsm_get_vnumainfo (xsm_default_t def, struct domain *d)
+     return xsm_ops->get_vnumainfo(d);
+ }
+ 
+-#ifdef HAS_MEM_ACCESS
+ static inline int xsm_vm_event_control (xsm_default_t def, struct domain *d, int mode, int op)
+ {
+     return xsm_ops->vm_event_control(d, mode, op);
+@@ -553,7 +550,6 @@ static inline int xsm_vm_event_op (xsm_default_t def, struct domain *d, int op)
+ {
+     return xsm_ops->vm_event_op(d, op);
+ }
+-#endif
+ 
+ #ifdef CONFIG_X86
+ static inline int xsm_do_mca(xsm_default_t def)
+diff --git a/xen/xsm/dummy.c b/xen/xsm/dummy.c
+index 25fca68..6d12d32 100644
+--- a/xen/xsm/dummy.c
++++ b/xen/xsm/dummy.c
+@@ -118,10 +118,8 @@ void xsm_fixup_ops (struct xsm_operations *ops)
+     set_to_dummy_if_null(ops, remove_from_physmap);
+     set_to_dummy_if_null(ops, map_gmfn_foreign);
+ 
+-#ifdef HAS_MEM_ACCESS
+     set_to_dummy_if_null(ops, vm_event_control);
+     set_to_dummy_if_null(ops, vm_event_op);
+-#endif
+ 
+ #ifdef CONFIG_X86
+     set_to_dummy_if_null(ops, do_mca);
+diff --git a/xen/xsm/flask/hooks.c b/xen/xsm/flask/hooks.c
+index 266915f..c34c793 100644
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -577,9 +577,7 @@ static int flask_domctl(struct domain *d, int cmd)
+     case XEN_DOMCTL_iomem_permission:
+     case XEN_DOMCTL_memory_mapping:
+     case XEN_DOMCTL_set_target:
+-#ifdef HAS_MEM_ACCESS
+     case XEN_DOMCTL_vm_event_op:
+-#endif
+ #ifdef CONFIG_X86
+     /* These have individual XSM hooks (arch/x86/domctl.c) */
+     case XEN_DOMCTL_shadow_op:
+@@ -689,10 +687,10 @@ static int flask_domctl(struct domain *d, int cmd)
+         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__TRIGGER);
+ 
+     case XEN_DOMCTL_set_access_required:
+-        return current_has_perm(d, SECCLASS_HVM, HVM__VM_EVENT);
++        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
+ 
+     case XEN_DOMCTL_monitor_op:
+-        return current_has_perm(d, SECCLASS_HVM, HVM__VM_EVENT);
++        return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
+ 
+     case XEN_DOMCTL_debug_op:
+     case XEN_DOMCTL_gdbsx_guestmemio:
+@@ -1139,6 +1137,16 @@ static int flask_hvm_param_nested(struct domain *d)
+     return current_has_perm(d, SECCLASS_HVM, HVM__NESTED);
+ }
+ 
++static int flask_vm_event_control(struct domain *d, int mode, int op)
++{
++    return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
++}
++
++static int flask_vm_event_op(struct domain *d, int op)
++{
++    return current_has_perm(d, SECCLASS_DOMAIN2, DOMAIN2__VM_EVENT);
++}
++
+ #if defined(HAS_PASSTHROUGH) && defined(HAS_PCI)
+ static int flask_get_device_group(uint32_t machine_bdf)
+ {
+@@ -1205,18 +1213,6 @@ static int flask_deassign_device(struct domain *d, uint32_t machine_bdf)
+ }
+ #endif /* HAS_PASSTHROUGH && HAS_PCI */
+ 
+-#ifdef HAS_MEM_ACCESS
+-static int flask_vm_event_control(struct domain *d, int mode, int op)
+-{
+-    return current_has_perm(d, SECCLASS_HVM, HVM__VM_EVENT);
+-}
+-
+-static int flask_vm_event_op(struct domain *d, int op)
+-{
+-    return current_has_perm(d, SECCLASS_HVM, HVM__VM_EVENT);
+-}
+-#endif /* HAS_MEM_ACCESS */
+-
+ #ifdef CONFIG_X86
+ static int flask_do_mca(void)
+ {
+@@ -1584,6 +1580,9 @@ static struct xsm_operations flask_ops = {
+     .do_xsm_op = do_flask_op,
+     .get_vnumainfo = flask_get_vnumainfo,
+ 
++    .vm_event_control = flask_vm_event_control,
++    .vm_event_op = flask_vm_event_op,
++
+ #ifdef CONFIG_COMPAT
+     .do_compat_op = compat_flask_op,
+ #endif
+@@ -1599,11 +1598,6 @@ static struct xsm_operations flask_ops = {
+     .deassign_device = flask_deassign_device,
+ #endif
+ 
+-#ifdef HAS_MEM_ACCESS
+-    .vm_event_control = flask_vm_event_control,
+-    .vm_event_op = flask_vm_event_op,
+-#endif
+-
+ #ifdef CONFIG_X86
+     .do_mca = flask_do_mca,
+     .shadow_control = flask_shadow_control,
+diff --git a/xen/xsm/flask/policy/access_vectors b/xen/xsm/flask/policy/access_vectors
+index 821b787..d76325e 100644
+--- a/xen/xsm/flask/policy/access_vectors
++++ b/xen/xsm/flask/policy/access_vectors
+@@ -218,6 +218,10 @@ class domain2
+     get_vnumainfo
+ # XEN_DOMCTL_psr_cmt_op
+     psr_cmt_op
++# XEN_DOMCTL_set_access_required
++# XEN_DOMCTL_monitor_op
++# XEN_DOMCTL_vm_event_op
++    vm_event
+ # XEN_DOMCTL_configure_domain
+     configure_domain
+ }
+@@ -248,10 +252,6 @@ class hvm
+ # HVMOP_set_mem_access, HVMOP_get_mem_access, HVMOP_pagetable_dying,
+ # HVMOP_inject_trap
+     hvmctl
+-# XEN_DOMCTL_set_access_required
+-# XEN_DOMCTL_monitor_op
+-# XEN_DOMCTL_vm_event_op
+-    vm_event
+ # XEN_DOMCTL_mem_sharing_op and XENMEM_sharing_op_{share,add_physmap} with:
+ #  source = the domain making the hypercall
+ #  target = domain whose memory is being shared
+-- 
+2.4.5
+

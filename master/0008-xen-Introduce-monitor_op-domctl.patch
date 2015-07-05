@@ -1,0 +1,1467 @@
+From 9f4fff863c12c2e074aafc817000a56444183086 Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Date: Thu, 9 Apr 2015 16:32:48 +0200
+Subject: [PATCH 08/22] xen: Introduce monitor_op domctl
+
+In preparation for allowing for introspecting ARM and PV domains the old
+control interface via the hvm_op hypercall is retired. A new control mechanism
+is introduced via the domctl hypercall: monitor_op.
+
+This patch aims to establish a base API on which future applications can build
+on.
+
+Suggested-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Signed-off-by: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Acked-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Kevin Tian <kevin.tian@intel.com>
+Acked-by: Daniel De Graaf <dgdegra@tycho.nsa.gov>
+Acked-by: Tim Deegan <tim@xen.org>
+---
+ MAINTAINERS                         |   1 +
+ tools/libxc/Makefile                |   1 +
+ tools/libxc/include/xenctrl.h       |  27 +++++
+ tools/libxc/xc_domain.c             |  28 +++++-
+ tools/libxc/xc_mem_access.c         |  33 ++++--
+ tools/libxc/xc_monitor.c            | 115 +++++++++++++++++++++
+ tools/libxc/xc_private.h            |   2 +-
+ tools/libxc/xc_vm_event.c           |   7 +-
+ tools/tests/xen-access/xen-access.c |  30 +++---
+ xen/arch/x86/Makefile               |   1 +
+ xen/arch/x86/hvm/emulate.c          |   2 +-
+ xen/arch/x86/hvm/event.c            |  82 ++++++++-------
+ xen/arch/x86/hvm/hvm.c              |  35 +------
+ xen/arch/x86/hvm/vmx/vmcs.c         |   7 +-
+ xen/arch/x86/hvm/vmx/vmx.c          |   2 +-
+ xen/arch/x86/mm/p2m.c               |   9 --
+ xen/arch/x86/monitor.c              | 196 ++++++++++++++++++++++++++++++++++++
+ xen/common/domctl.c                 |   9 ++
+ xen/common/mem_access.c             |   8 ++
+ xen/common/vm_event.c               |  33 +-----
+ xen/include/asm-arm/monitor.h       |  35 +++++++
+ xen/include/asm-arm/p2m.h           |  18 +++-
+ xen/include/asm-x86/domain.h        |  20 ++++
+ xen/include/asm-x86/hvm/domain.h    |   1 -
+ xen/include/asm-x86/monitor.h       |  31 ++++++
+ xen/include/asm-x86/p2m.h           |  35 +++++--
+ xen/include/public/domctl.h         |  48 ++++++++-
+ xen/include/public/hvm/params.h     |   9 +-
+ xen/include/public/memory.h         |   2 +
+ xen/include/public/vm_event.h       |   2 +-
+ xen/xsm/flask/hooks.c               |   3 +
+ xen/xsm/flask/policy/access_vectors |   2 +
+ 32 files changed, 668 insertions(+), 166 deletions(-)
+ create mode 100644 tools/libxc/xc_monitor.c
+ create mode 100644 xen/arch/x86/monitor.c
+ create mode 100644 xen/include/asm-arm/monitor.h
+ create mode 100644 xen/include/asm-x86/monitor.h
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 5dc3cce..8f47cae 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -371,6 +371,7 @@ S:	Supported
+ F:	xen/common/vm_event.c
+ F:	xen/common/mem_access.c
+ F:	xen/arch/x86/hvm/event.c
++F:	xen/arch/x86/monitor.c
+ 
+ XENTRACE
+ M:	George Dunlap <george.dunlap@eu.citrix.com>
+diff --git a/tools/libxc/Makefile b/tools/libxc/Makefile
+index 5c5baeb..ce48daa 100644
+--- a/tools/libxc/Makefile
++++ b/tools/libxc/Makefile
+@@ -32,6 +32,7 @@ CTRL_SRCS-y       += xc_cpu_hotplug.c
+ CTRL_SRCS-y       += xc_resume.c
+ CTRL_SRCS-y       += xc_tmem.c
+ CTRL_SRCS-y       += xc_vm_event.c
++CTRL_SRCS-y       += xc_monitor.c
+ CTRL_SRCS-y       += xc_mem_paging.c
+ CTRL_SRCS-y       += xc_mem_access.c
+ CTRL_SRCS-y       += xc_memshr.c
+diff --git a/tools/libxc/include/xenctrl.h b/tools/libxc/include/xenctrl.h
+index 516937c..8d60b02 100644
+--- a/tools/libxc/include/xenctrl.h
++++ b/tools/libxc/include/xenctrl.h
+@@ -34,6 +34,7 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#include <stdbool.h>
+ #include <xen/xen.h>
+ #include <xen/domctl.h>
+ #include <xen/physdev.h>
+@@ -2349,6 +2350,32 @@ int xc_set_mem_access(xc_interface *xch, domid_t domain_id,
+ int xc_get_mem_access(xc_interface *xch, domid_t domain_id,
+                       uint64_t pfn, xenmem_access_t *access);
+ 
++/*
++ * Instructions causing a mem_access violation can be emulated by Xen
++ * to progress the execution without having to relax the mem_access
++ * permissions.
++ * This feature has to be first enabled, then in the vm_event
++ * response to a mem_access event it can be indicated if the instruction
++ * should be emulated.
++ */
++int xc_mem_access_enable_emulate(xc_interface *xch, domid_t domain_id);
++int xc_mem_access_disable_emulate(xc_interface *xch, domid_t domain_id);
++
++/***
++ * Monitor control operations.
++ */
++int xc_monitor_mov_to_cr0(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool sync, bool onchangeonly);
++int xc_monitor_mov_to_cr3(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool sync, bool onchangeonly);
++int xc_monitor_mov_to_cr4(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool sync, bool onchangeonly);
++int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool extended_capture);
++int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id, bool enable);
++int xc_monitor_software_breakpoint(xc_interface *xch, domid_t domain_id,
++                                   bool enable);
++
+ /***
+  * Memory sharing operations.
+  *
+diff --git a/tools/libxc/xc_domain.c b/tools/libxc/xc_domain.c
+index 4455998..b64eb69 100644
+--- a/tools/libxc/xc_domain.c
++++ b/tools/libxc/xc_domain.c
+@@ -1430,11 +1430,32 @@ int xc_domain_send_trigger(xc_interface *xch,
+     return do_domctl(xch, &domctl);
+ }
+ 
++static inline int xc_hvm_param_deprecated_check(uint32_t param)
++{
++    switch ( param )
++    {
++        case HVM_PARAM_MEMORY_EVENT_CR0:
++        case HVM_PARAM_MEMORY_EVENT_CR3:
++        case HVM_PARAM_MEMORY_EVENT_CR4:
++        case HVM_PARAM_MEMORY_EVENT_INT3:
++        case HVM_PARAM_MEMORY_EVENT_SINGLE_STEP:
++        case HVM_PARAM_MEMORY_EVENT_MSR:
++            return -EOPNOTSUPP;
++        default:
++            break;
++    };
++
++    return 0;
++}
++
+ int xc_hvm_param_set(xc_interface *handle, domid_t dom, uint32_t param, uint64_t value)
+ {
+     DECLARE_HYPERCALL;
+     DECLARE_HYPERCALL_BUFFER(xen_hvm_param_t, arg);
+-    int rc;
++    int rc = xc_hvm_param_deprecated_check(param);
++
++    if ( rc )
++        return rc;
+ 
+     arg = xc_hypercall_buffer_alloc(handle, arg, sizeof(*arg));
+     if ( arg == NULL )
+@@ -1455,7 +1476,10 @@ int xc_hvm_param_get(xc_interface *handle, domid_t dom, uint32_t param, uint64_t
+ {
+     DECLARE_HYPERCALL;
+     DECLARE_HYPERCALL_BUFFER(xen_hvm_param_t, arg);
+-    int rc;
++    int rc = xc_hvm_param_deprecated_check(param);
++
++    if ( rc )
++        return rc;
+ 
+     arg = xc_hypercall_buffer_alloc(handle, arg, sizeof(*arg));
+     if ( arg == NULL )
+diff --git a/tools/libxc/xc_mem_access.c b/tools/libxc/xc_mem_access.c
+index 0a3f0e6..f27bc44 100644
+--- a/tools/libxc/xc_mem_access.c
++++ b/tools/libxc/xc_mem_access.c
+@@ -27,14 +27,7 @@
+ void *xc_mem_access_enable(xc_interface *xch, domid_t domain_id, uint32_t *port)
+ {
+     return xc_vm_event_enable(xch, domain_id, HVM_PARAM_MONITOR_RING_PFN,
+-                              port, 0);
+-}
+-
+-void *xc_mem_access_enable_introspection(xc_interface *xch, domid_t domain_id,
+-                                         uint32_t *port)
+-{
+-    return xc_vm_event_enable(xch, domain_id, HVM_PARAM_MONITOR_RING_PFN,
+-                              port, 1);
++                              port);
+ }
+ 
+ int xc_mem_access_disable(xc_interface *xch, domid_t domain_id)
+@@ -95,6 +88,30 @@ int xc_get_mem_access(xc_interface *xch,
+     return rc;
+ }
+ 
++int xc_mem_access_enable_emulate(xc_interface *xch,
++                                 domid_t domain_id)
++{
++    xen_mem_access_op_t mao =
++    {
++        .op     = XENMEM_access_op_enable_emulate,
++        .domid  = domain_id,
++    };
++
++    return do_memory_op(xch, XENMEM_access_op, &mao, sizeof(mao));
++}
++
++int xc_mem_access_disable_emulate(xc_interface *xch,
++                                  domid_t domain_id)
++{
++    xen_mem_access_op_t mao =
++    {
++        .op     = XENMEM_access_op_disable_emulate,
++        .domid  = domain_id,
++    };
++
++    return do_memory_op(xch, XENMEM_access_op, &mao, sizeof(mao));
++}
++
+ /*
+  * Local variables:
+  * mode: C
+diff --git a/tools/libxc/xc_monitor.c b/tools/libxc/xc_monitor.c
+new file mode 100644
+index 0000000..fe090bc
+--- /dev/null
++++ b/tools/libxc/xc_monitor.c
+@@ -0,0 +1,115 @@
++/******************************************************************************
++ *
++ * xc_monitor.c
++ *
++ * Interface to VM event monitor
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ */
++
++#include "xc_private.h"
++
++int xc_monitor_mov_to_cr0(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool sync, bool onchangeonly)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR0;
++    domctl.u.monitor_op.u.mov_to_cr.sync = sync;
++    domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
++
++    return do_domctl(xch, &domctl);
++}
++
++int xc_monitor_mov_to_cr3(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool sync, bool onchangeonly)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR3;
++    domctl.u.monitor_op.u.mov_to_cr.sync = sync;
++    domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
++
++    return do_domctl(xch, &domctl);
++}
++
++int xc_monitor_mov_to_cr4(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool sync, bool onchangeonly)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR4;
++    domctl.u.monitor_op.u.mov_to_cr.sync = sync;
++    domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
++
++    return do_domctl(xch, &domctl);
++}
++
++int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, bool enable,
++                          bool extended_capture)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR;
++    domctl.u.monitor_op.u.mov_to_msr.extended_capture = extended_capture;
++
++    return do_domctl(xch, &domctl);
++}
++
++int xc_monitor_software_breakpoint(xc_interface *xch, domid_t domain_id,
++                                   bool enable)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT;
++
++    return do_domctl(xch, &domctl);
++}
++
++int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id,
++                          bool enable)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP;
++
++    return do_domctl(xch, &domctl);
++}
+diff --git a/tools/libxc/xc_private.h b/tools/libxc/xc_private.h
+index f6b1fb2..a0029f9 100644
+--- a/tools/libxc/xc_private.h
++++ b/tools/libxc/xc_private.h
+@@ -445,6 +445,6 @@ int xc_vm_event_control(xc_interface *xch, domid_t domain_id, unsigned int op,
+  * param can be HVM_PARAM_PAGING/ACCESS/SHARING_RING_PFN
+  */
+ void *xc_vm_event_enable(xc_interface *xch, domid_t domain_id, int param,
+-                         uint32_t *port, int enable_introspection);
++                         uint32_t *port);
+ 
+ #endif /* __XC_PRIVATE_H__ */
+diff --git a/tools/libxc/xc_vm_event.c b/tools/libxc/xc_vm_event.c
+index d458b9a..7277e86 100644
+--- a/tools/libxc/xc_vm_event.c
++++ b/tools/libxc/xc_vm_event.c
+@@ -41,7 +41,7 @@ int xc_vm_event_control(xc_interface *xch, domid_t domain_id, unsigned int op,
+ }
+ 
+ void *xc_vm_event_enable(xc_interface *xch, domid_t domain_id, int param,
+-                         uint32_t *port, int enable_introspection)
++                         uint32_t *port)
+ {
+     void *ring_page = NULL;
+     uint64_t pfn;
+@@ -104,10 +104,7 @@ void *xc_vm_event_enable(xc_interface *xch, domid_t domain_id, int param,
+         break;
+ 
+     case HVM_PARAM_MONITOR_RING_PFN:
+-        if ( enable_introspection )
+-            op = XEN_VM_EVENT_MONITOR_ENABLE_INTROSPECTION;
+-        else
+-            op = XEN_VM_EVENT_MONITOR_ENABLE;
++        op = XEN_VM_EVENT_MONITOR_ENABLE;
+         mode = XEN_DOMCTL_VM_EVENT_OP_MONITOR;
+         break;
+ 
+diff --git a/tools/tests/xen-access/xen-access.c b/tools/tests/xen-access/xen-access.c
+index d667bf5..23438fc 100644
+--- a/tools/tests/xen-access/xen-access.c
++++ b/tools/tests/xen-access/xen-access.c
+@@ -317,9 +317,9 @@ static void put_response(vm_event_t *vm_event, vm_event_response_t *rsp)
+ void usage(char* progname)
+ {
+     fprintf(stderr,
+-            "Usage: %s [-m] <domain_id> write|exec|int3\n"
++            "Usage: %s [-m] <domain_id> write|exec|breakpoint\n"
+             "\n"
+-            "Logs first page writes, execs, or int3 traps that occur on the domain.\n"
++            "Logs first page writes, execs, or breakpoint traps that occur on the domain.\n"
+             "\n"
+             "-m requires this program to run, or else the domain may pause\n",
+             progname);
+@@ -338,7 +338,7 @@ int main(int argc, char *argv[])
+     xenmem_access_t default_access = XENMEM_access_rwx;
+     xenmem_access_t after_first_access = XENMEM_access_rwx;
+     int required = 0;
+-    int int3 = 0;
++    int breakpoint = 0;
+     int shutting_down = 0;
+ 
+     char* progname = argv[0];
+@@ -378,9 +378,9 @@ int main(int argc, char *argv[])
+         default_access = XENMEM_access_rw;
+         after_first_access = XENMEM_access_rwx;
+     }
+-    else if ( !strcmp(argv[0], "int3") )
++    else if ( !strcmp(argv[0], "breakpoint") )
+     {
+-        int3 = 1;
++        breakpoint = 1;
+     }
+     else
+     {
+@@ -431,14 +431,14 @@ int main(int argc, char *argv[])
+         goto exit;
+     }
+ 
+-    if ( int3 )
+-        rc = xc_hvm_param_set(xch, domain_id, HVM_PARAM_MEMORY_EVENT_INT3, HVMPME_mode_sync);
+-    else
+-        rc = xc_hvm_param_set(xch, domain_id, HVM_PARAM_MEMORY_EVENT_INT3, HVMPME_mode_disabled);
+-    if ( rc < 0 )
++    if ( breakpoint )
+     {
+-        ERROR("Error %d setting int3 vm_event\n", rc);
+-        goto exit;
++        rc = xc_monitor_software_breakpoint(xch, domain_id, 1);
++        if ( rc < 0 )
++        {
++            ERROR("Error %d setting breakpoint trapping with vm_event\n", rc);
++            goto exit;
++        }
+     }
+ 
+     /* Wait for access */
+@@ -452,7 +452,7 @@ int main(int argc, char *argv[])
+             rc = xc_set_mem_access(xch, domain_id, XENMEM_access_rwx, ~0ull, 0);
+             rc = xc_set_mem_access(xch, domain_id, XENMEM_access_rwx, 0,
+                                    xenaccess->domain_info->max_pages);
+-            rc = xc_hvm_param_set(xch, domain_id, HVM_PARAM_MEMORY_EVENT_INT3, HVMPME_mode_disabled);
++            rc = xc_monitor_software_breakpoint(xch, domain_id, 0);
+ 
+             shutting_down = 1;
+         }
+@@ -527,7 +527,7 @@ int main(int argc, char *argv[])
+                 rsp.u.mem_access.gfn = req.u.mem_access.gfn;
+                 break;
+             case VM_EVENT_REASON_SOFTWARE_BREAKPOINT:
+-                printf("INT3: rip=%016"PRIx64", gfn=%"PRIx64" (vcpu %d)\n",
++                printf("Breakpoint: rip=%016"PRIx64", gfn=%"PRIx64" (vcpu %d)\n",
+                        req.regs.x86.rip,
+                        req.u.software_breakpoint.gfn,
+                        req.vcpu_id);
+@@ -538,7 +538,7 @@ int main(int argc, char *argv[])
+                     HVMOP_TRAP_sw_exc, -1, 0, 0);
+                 if (rc < 0)
+                 {
+-                    ERROR("Error %d injecting int3\n", rc);
++                    ERROR("Error %d injecting breakpoint\n", rc);
+                     interrupted = -1;
+                     continue;
+                 }
+diff --git a/xen/arch/x86/Makefile b/xen/arch/x86/Makefile
+index 42ed9c9..a9ff27a 100644
+--- a/xen/arch/x86/Makefile
++++ b/xen/arch/x86/Makefile
+@@ -36,6 +36,7 @@ obj-y += microcode_intel.o
+ # This must come after the vendor specific files.
+ obj-y += microcode.o
+ obj-y += mm.o
++obj-y += monitor.o
+ obj-y += mpparse.o
+ obj-y += nmi.o
+ obj-y += numa.o
+diff --git a/xen/arch/x86/hvm/emulate.c b/xen/arch/x86/hvm/emulate.c
+index fa463f1..9f07bab 100644
+--- a/xen/arch/x86/hvm/emulate.c
++++ b/xen/arch/x86/hvm/emulate.c
+@@ -411,7 +411,7 @@ static int hvmemul_virtual_to_linear(
+      * being triggered for repeated writes to a whole page.
+      */
+     *reps = min_t(unsigned long, *reps,
+-                  unlikely(current->domain->arch.hvm_domain.introspection_enabled)
++                  unlikely(current->domain->arch.mem_access_emulate_enabled)
+                            ? 1 : 4096);
+ 
+     reg = hvmemul_get_seg_reg(seg, hvmemul_ctxt);
+diff --git a/xen/arch/x86/hvm/event.c b/xen/arch/x86/hvm/event.c
+index dfb0ab7..9d5f9f3 100644
+--- a/xen/arch/x86/hvm/event.c
++++ b/xen/arch/x86/hvm/event.c
+@@ -55,15 +55,12 @@ static void hvm_event_fill_regs(vm_event_request_t *req)
+     req->regs.x86.cr4 = curr->arch.hvm_vcpu.guest_cr[4];
+ }
+ 
+-static int hvm_event_traps(uint64_t parameters, vm_event_request_t *req)
++static int hvm_event_traps(uint8_t sync, vm_event_request_t *req)
+ {
+     int rc;
+     struct vcpu *curr = current;
+     struct domain *currd = curr->domain;
+ 
+-    if ( !(parameters & HVMPME_MODE_MASK) )
+-        return 0;
+-
+     rc = vm_event_claim_slot(currd, &currd->vm_event->monitor);
+     switch ( rc )
+     {
+@@ -79,7 +76,7 @@ static int hvm_event_traps(uint64_t parameters, vm_event_request_t *req)
+         return rc;
+     };
+ 
+-    if ( (parameters & HVMPME_MODE_MASK) == HVMPME_mode_sync )
++    if ( sync )
+     {
+         req->flags |= VM_EVENT_FLAG_VCPU_PAUSED;
+         vm_event_vcpu_pause(curr);
+@@ -91,41 +88,53 @@ static int hvm_event_traps(uint64_t parameters, vm_event_request_t *req)
+     return 1;
+ }
+ 
+-static void hvm_event_cr(uint32_t reason, unsigned long value,
+-                         unsigned long old, uint64_t parameters)
++static inline
++void hvm_event_cr(uint32_t reason, unsigned long value,
++                         unsigned long old, bool_t onchangeonly, bool_t sync)
+ {
+-    vm_event_request_t req = {
+-        .reason = reason,
+-        .vcpu_id = current->vcpu_id,
+-        .u.mov_to_cr.new_value = value,
+-        .u.mov_to_cr.old_value = old
+-    };
+-
+-    if ( (parameters & HVMPME_onchangeonly) && (value == old) )
++    if ( onchangeonly && value == old )
+         return;
+-
+-    hvm_event_traps(parameters, &req);
++    else
++    {
++        vm_event_request_t req = {
++            .reason = reason,
++            .vcpu_id = current->vcpu_id,
++            .u.mov_to_cr.new_value = value,
++            .u.mov_to_cr.old_value = old
++        };
++
++        hvm_event_traps(sync, &req);
++    }
+ }
+ 
+ void hvm_event_cr0(unsigned long value, unsigned long old)
+ {
+-    hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR0, value, old,
+-                 current->domain->arch.hvm_domain
+-                      .params[HVM_PARAM_MEMORY_EVENT_CR0]);
++    struct arch_domain *currad = &current->domain->arch;
++
++    if ( currad->monitor.mov_to_cr0_enabled )
++        hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR0, value, old,
++                     currad->monitor.mov_to_cr0_onchangeonly,
++                     currad->monitor.mov_to_cr0_sync);
+ }
+ 
+ void hvm_event_cr3(unsigned long value, unsigned long old)
+ {
+-    hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR3, value, old,
+-                 current->domain->arch.hvm_domain
+-                      .params[HVM_PARAM_MEMORY_EVENT_CR3]);
++    struct arch_domain *currad = &current->domain->arch;
++
++    if ( currad->monitor.mov_to_cr3_enabled )
++        hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR3, value, old,
++                     currad->monitor.mov_to_cr3_onchangeonly,
++                     currad->monitor.mov_to_cr3_sync);
+ }
+ 
+ void hvm_event_cr4(unsigned long value, unsigned long old)
+ {
+-    hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR4, value, old,
+-                 current->domain->arch.hvm_domain
+-                      .params[HVM_PARAM_MEMORY_EVENT_CR4]);
++    struct arch_domain *currad = &current->domain->arch;
++
++    if ( currad->monitor.mov_to_cr4_enabled )
++        hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR4, value, old,
++                     currad->monitor.mov_to_cr4_onchangeonly,
++                     currad->monitor.mov_to_cr4_sync);
+ }
+ 
+ void hvm_event_msr(unsigned int msr, uint64_t value)
+@@ -137,14 +146,14 @@ void hvm_event_msr(unsigned int msr, uint64_t value)
+         .u.mov_to_msr.msr = msr,
+         .u.mov_to_msr.value = value,
+     };
+-    uint64_t params = curr->domain->arch.hvm_domain
+-                        .params[HVM_PARAM_MEMORY_EVENT_MSR];
+ 
+-    hvm_event_traps(params, &req);
++    if ( curr->domain->arch.monitor.mov_to_msr_enabled )
++        hvm_event_traps(1, &req);
+ }
+ 
+ int hvm_event_int3(unsigned long gla)
+ {
++    int rc = 0;
+     uint32_t pfec = PFEC_page_present;
+     struct vcpu *curr = current;
+     vm_event_request_t req = {
+@@ -152,14 +161,16 @@ int hvm_event_int3(unsigned long gla)
+         .vcpu_id = curr->vcpu_id,
+         .u.software_breakpoint.gfn = paging_gva_to_gfn(curr, gla, &pfec)
+     };
+-    uint64_t params = curr->domain->arch.hvm_domain
+-                        .params[HVM_PARAM_MEMORY_EVENT_INT3];
+ 
+-    return hvm_event_traps(params, &req);
++    if ( curr->domain->arch.monitor.software_breakpoint_enabled )
++        rc = hvm_event_traps(1, &req);
++
++    return rc;
+ }
+ 
+ int hvm_event_single_step(unsigned long gla)
+ {
++    int rc = 0;
+     uint32_t pfec = PFEC_page_present;
+     struct vcpu *curr = current;
+     vm_event_request_t req = {
+@@ -167,10 +178,11 @@ int hvm_event_single_step(unsigned long gla)
+         .vcpu_id = curr->vcpu_id,
+         .u.singlestep.gfn = paging_gva_to_gfn(curr, gla, &pfec)
+     };
+-    uint64_t params = curr->domain->arch.hvm_domain
+-                        .params[HVM_PARAM_MEMORY_EVENT_SINGLE_STEP];
+ 
+-    return hvm_event_traps(params, &req);
++    if ( curr->domain->arch.monitor.singlestep_enabled )
++        rc = hvm_event_traps(1, &req);
++
++    return rc;
+ }
+ 
+ /*
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index 13d520a..999943b 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -5789,19 +5789,11 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
+             case HVM_PARAM_MEMORY_EVENT_CR0:
+             case HVM_PARAM_MEMORY_EVENT_CR3:
+             case HVM_PARAM_MEMORY_EVENT_CR4:
+-                if ( d == current->domain )
+-                    rc = -EPERM;
+-                break;
+             case HVM_PARAM_MEMORY_EVENT_INT3:
+             case HVM_PARAM_MEMORY_EVENT_SINGLE_STEP:
+             case HVM_PARAM_MEMORY_EVENT_MSR:
+-                if ( d == current->domain )
+-                {
+-                    rc = -EPERM;
+-                    break;
+-                }
+-                if ( a.value & HVMPME_onchangeonly )
+-                    rc = -EINVAL;
++                /* Deprecated */
++                rc = -EOPNOTSUPP;
+                 break;
+             case HVM_PARAM_NESTEDHVM:
+                 rc = xsm_hvm_param_nested(XSM_PRIV, d);
+@@ -5861,29 +5853,8 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
+             }
+             }
+ 
+-            if ( rc == 0 ) 
+-            {
++            if ( rc == 0 )
+                 d->arch.hvm_domain.params[a.index] = a.value;
+-
+-                switch( a.index )
+-                {
+-                case HVM_PARAM_MEMORY_EVENT_INT3:
+-                case HVM_PARAM_MEMORY_EVENT_SINGLE_STEP:
+-                {
+-                    domain_pause(d);
+-                    domain_unpause(d); /* Causes guest to latch new status */
+-                    break;
+-                }
+-                case HVM_PARAM_MEMORY_EVENT_CR3:
+-                {
+-                    for_each_vcpu ( d, v )
+-                        hvm_funcs.update_guest_cr(v, 0); /* Latches new CR3 mask through CR0 code */
+-                    break;
+-                }
+-                }
+-
+-            }
+-
+         }
+         else
+         {
+diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
+index 6db919a..0068acc 100644
+--- a/xen/arch/x86/hvm/vmx/vmcs.c
++++ b/xen/arch/x86/hvm/vmx/vmcs.c
+@@ -714,7 +714,8 @@ void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
+     if ( msr_bitmap == NULL )
+         return;
+ 
+-    if ( unlikely(d->arch.hvm_domain.introspection_enabled) &&
++    if ( unlikely(d->arch.monitor.mov_to_msr_enabled &&
++                  d->arch.monitor.mov_to_msr_extended) &&
+          vm_event_check_ring(&d->vm_event->monitor) )
+     {
+         unsigned int i;
+@@ -1375,8 +1376,8 @@ void vmx_do_resume(struct vcpu *v)
+     }
+ 
+     debug_state = v->domain->debugger_attached
+-                  || v->domain->arch.hvm_domain.params[HVM_PARAM_MEMORY_EVENT_INT3]
+-                  || v->domain->arch.hvm_domain.params[HVM_PARAM_MEMORY_EVENT_SINGLE_STEP];
++                  || v->domain->arch.monitor.software_breakpoint_enabled
++                  || v->domain->arch.monitor.singlestep_enabled;
+ 
+     if ( unlikely(v->arch.hvm_vcpu.debug_state_latch != debug_state) )
+     {
+diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
+index e10d0d8..6d710b9 100644
+--- a/xen/arch/x86/hvm/vmx/vmx.c
++++ b/xen/arch/x86/hvm/vmx/vmx.c
+@@ -1228,7 +1228,7 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
+                 v->arch.hvm_vmx.exec_control |= cr3_ctls;
+ 
+             /* Trap CR3 updates if CR3 memory events are enabled. */
+-            if ( v->domain->arch.hvm_domain.params[HVM_PARAM_MEMORY_EVENT_CR3] )
++            if ( v->domain->arch.monitor.mov_to_cr3_enabled )
+                 v->arch.hvm_vmx.exec_control |= CPU_BASED_CR3_LOAD_EXITING;
+ 
+             vmx_update_cpu_exec_control(v);
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index ed226f5..0b56d57 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1450,15 +1450,6 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
+     }
+ }
+ 
+-void p2m_setup_introspection(struct domain *d)
+-{
+-    if ( hvm_funcs.enable_msr_exit_interception )
+-    {
+-        d->arch.hvm_domain.introspection_enabled = 1;
+-        hvm_funcs.enable_msr_exit_interception(d);
+-    }
+-}
+-
+ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+                             struct npfec npfec,
+                             vm_event_request_t **req_ptr)
+diff --git a/xen/arch/x86/monitor.c b/xen/arch/x86/monitor.c
+new file mode 100644
+index 0000000..d7b1c18
+--- /dev/null
++++ b/xen/arch/x86/monitor.c
+@@ -0,0 +1,196 @@
++/*
++ * arch/x86/monitor.c
++ *
++ * Architecture-specific monitor_op domctl handler.
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public
++ * License v2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 021110-1307, USA.
++ */
++
++#include <xen/config.h>
++#include <xen/sched.h>
++#include <xen/mm.h>
++#include <asm/domain.h>
++#include <asm/monitor.h>
++#include <public/domctl.h>
++#include <xsm/xsm.h>
++
++/*
++ * Sanity check whether option is already enabled/disabled
++ */
++static inline
++int status_check(struct xen_domctl_monitor_op *mop, bool_t status)
++{
++    bool_t requested_status = (mop->op == XEN_DOMCTL_MONITOR_OP_ENABLE);
++
++    if ( status == requested_status )
++        return -EEXIST;
++
++    return 0;
++}
++
++int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
++{
++    int rc;
++    struct arch_domain *ad = &d->arch;
++
++    rc = xsm_vm_event_control(XSM_PRIV, d, mop->op, mop->event);
++    if ( rc )
++        return rc;
++
++    /*
++     * At the moment only Intel HVM domains are supported. However, event
++     * delivery could be extended to AMD and PV domains.
++     */
++    if ( !is_hvm_domain(d) || !cpu_has_vmx )
++        return -EOPNOTSUPP;
++
++    /*
++     * Sanity check
++     */
++    if ( mop->op != XEN_DOMCTL_MONITOR_OP_ENABLE &&
++         mop->op != XEN_DOMCTL_MONITOR_OP_DISABLE )
++        return -EOPNOTSUPP;
++
++    switch ( mop->event )
++    {
++    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR0:
++    {
++        bool_t status = ad->monitor.mov_to_cr0_enabled;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        ad->monitor.mov_to_cr0_sync = mop->u.mov_to_cr.sync;
++        ad->monitor.mov_to_cr0_onchangeonly = mop->u.mov_to_cr.onchangeonly;
++
++        domain_pause(d);
++        ad->monitor.mov_to_cr0_enabled = !status;
++        domain_unpause(d);
++        break;
++    }
++
++    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR3:
++    {
++        bool_t status = ad->monitor.mov_to_cr3_enabled;
++        struct vcpu *v;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        ad->monitor.mov_to_cr3_sync = mop->u.mov_to_cr.sync;
++        ad->monitor.mov_to_cr3_onchangeonly = mop->u.mov_to_cr.onchangeonly;
++
++        domain_pause(d);
++        ad->monitor.mov_to_cr3_enabled = !status;
++        domain_unpause(d);
++
++        /* Latches new CR3 mask through CR0 code */
++        for_each_vcpu ( d, v )
++            hvm_funcs.update_guest_cr(v, 0);
++        break;
++    }
++
++    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR4:
++    {
++        bool_t status = ad->monitor.mov_to_cr4_enabled;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        ad->monitor.mov_to_cr4_sync = mop->u.mov_to_cr.sync;
++        ad->monitor.mov_to_cr4_onchangeonly = mop->u.mov_to_cr.onchangeonly;
++
++        domain_pause(d);
++        ad->monitor.mov_to_cr4_enabled = !status;
++        domain_unpause(d);
++        break;
++    }
++
++    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR:
++    {
++        bool_t status = ad->monitor.mov_to_msr_enabled;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        if ( mop->op == XEN_DOMCTL_MONITOR_OP_ENABLE &&
++             mop->u.mov_to_msr.extended_capture )
++        {
++            if ( hvm_funcs.enable_msr_exit_interception )
++            {
++                ad->monitor.mov_to_msr_extended = 1;
++                hvm_funcs.enable_msr_exit_interception(d);
++            }
++            else
++                return -EOPNOTSUPP;
++        } else
++            ad->monitor.mov_to_msr_extended = 0;
++
++        domain_pause(d);
++        ad->monitor.mov_to_msr_enabled = !status;
++        domain_unpause(d);
++        break;
++    }
++
++    case XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP:
++    {
++        bool_t status = ad->monitor.singlestep_enabled;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        domain_pause(d);
++        ad->monitor.singlestep_enabled = !status;
++        domain_unpause(d);
++        break;
++    }
++
++    case XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT:
++    {
++        bool_t status = ad->monitor.software_breakpoint_enabled;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        domain_pause(d);
++        ad->monitor.software_breakpoint_enabled = !status;
++        domain_unpause(d);
++        break;
++    }
++
++    default:
++        return -EOPNOTSUPP;
++
++    };
++
++    return 0;
++}
++
++/*
++ * Local variables:
++ * mode: C
++ * c-file-style: "BSD"
++ * c-basic-offset: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff --git a/xen/common/domctl.c b/xen/common/domctl.c
+index e372250..e394ed6 100644
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -29,6 +29,7 @@
+ #include <asm/irq.h>
+ #include <asm/page.h>
+ #include <asm/p2m.h>
++#include <asm/monitor.h>
+ #include <public/domctl.h>
+ #include <xsm/xsm.h>
+ 
+@@ -1218,6 +1219,14 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+         break;
+     }
+ 
++    case XEN_DOMCTL_monitor_op:
++        ret = -EPERM;
++        if ( current->domain == d )
++            break;
++
++        ret = monitor_domctl(d, &op->u.monitor_op);
++        break;
++
+     default:
+         ret = arch_do_domctl(op, d, u_domctl);
+         break;
+diff --git a/xen/common/mem_access.c b/xen/common/mem_access.c
+index 4bbe2f9..f925ac7 100644
+--- a/xen/common/mem_access.c
++++ b/xen/common/mem_access.c
+@@ -140,6 +140,14 @@ int mem_access_memop(unsigned long cmd,
+         break;
+     }
+ 
++    case XENMEM_access_op_enable_emulate:
++        rc = p2m_mem_access_enable_emulate(d);
++        break;
++
++    case XENMEM_access_op_disable_emulate:
++        rc = p2m_mem_access_disable_emulate(d);
++        break;
++
+     default:
+         rc = -ENOSYS;
+         break;
+diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
+index 136225b..348fad2 100644
+--- a/xen/common/vm_event.c
++++ b/xen/common/vm_event.c
+@@ -599,11 +599,9 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+         break;
+ 
+         case XEN_VM_EVENT_PAGING_DISABLE:
+-        {
+             if ( med->ring_page )
+                 rc = vm_event_disable(d, med);
+-        }
+-        break;
++            break;
+ 
+         default:
+             rc = -ENOSYS;
+@@ -622,32 +620,15 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+         switch( mec->op )
+         {
+         case XEN_VM_EVENT_MONITOR_ENABLE:
+-        case XEN_VM_EVENT_MONITOR_ENABLE_INTROSPECTION:
+-        {
+-            rc = -ENODEV;
+-            if ( !p2m_vm_event_sanity_check(d) )
+-                break;
+-
+             rc = vm_event_enable(d, mec, med, _VPF_mem_access,
+                                     HVM_PARAM_MONITOR_RING_PFN,
+                                     mem_access_notification);
+-
+-            if ( mec->op == XEN_VM_EVENT_MONITOR_ENABLE_INTROSPECTION
+-                 && !rc )
+-                p2m_setup_introspection(d);
+-
+-        }
+-        break;
++            break;
+ 
+         case XEN_VM_EVENT_MONITOR_DISABLE:
+-        {
+             if ( med->ring_page )
+-            {
+                 rc = vm_event_disable(d, med);
+-                d->arch.hvm_domain.introspection_enabled = 0;
+-            }
+-        }
+-        break;
++            break;
+ 
+         default:
+             rc = -ENOSYS;
+@@ -666,7 +647,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+         switch( mec->op )
+         {
+         case XEN_VM_EVENT_SHARING_ENABLE:
+-        {
+             rc = -EOPNOTSUPP;
+             /* pvh fixme: p2m_is_foreign types need addressing */
+             if ( is_pvh_vcpu(current) || is_pvh_domain(hardware_domain) )
+@@ -680,15 +660,12 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+             rc = vm_event_enable(d, mec, med, _VPF_mem_sharing,
+                                     HVM_PARAM_SHARING_RING_PFN,
+                                     mem_sharing_notification);
+-        }
+-        break;
++            break;
+ 
+         case XEN_VM_EVENT_SHARING_DISABLE:
+-        {
+             if ( med->ring_page )
+                 rc = vm_event_disable(d, med);
+-        }
+-        break;
++            break;
+ 
+         default:
+             rc = -ENOSYS;
+diff --git a/xen/include/asm-arm/monitor.h b/xen/include/asm-arm/monitor.h
+new file mode 100644
+index 0000000..0f01e06
+--- /dev/null
++++ b/xen/include/asm-arm/monitor.h
+@@ -0,0 +1,35 @@
++/*
++ * include/asm-arm/monitor.h
++ *
++ * Architecture-specific monitor_op domctl handler.
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public
++ * License v2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 021110-1307, USA.
++ */
++
++#ifndef __ASM_ARM_MONITOR_H__
++#define __ASM_ARM_MONITOR_H__
++
++#include <xen/sched.h>
++#include <public/domctl.h>
++
++static inline
++int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *op)
++{
++    return -ENOSYS;
++}
++
++#endif /* __ASM_X86_MONITOR_H__ */
+diff --git a/xen/include/asm-arm/p2m.h b/xen/include/asm-arm/p2m.h
+index 23cf7d8..11efb5b 100644
+--- a/xen/include/asm-arm/p2m.h
++++ b/xen/include/asm-arm/p2m.h
+@@ -71,16 +71,24 @@ typedef enum {
+ } p2m_type_t;
+ 
+ static inline
+-void p2m_mem_access_emulate_check(struct vcpu *v,
+-                                  const vm_event_response_t *rsp)
++int p2m_mem_access_enable_emulate(struct domain *d)
+ {
+-    /* Not supported on ARM. */
++    /* Not supported on ARM */
++    return -ENOSYS;
++}
++
++static inline
++int p2m_mem_access_disable_emulate(struct domain *d)
++{
++    /* Not supported on ARM */
++    return -ENOSYS;
+ }
+ 
+ static inline
+-void p2m_setup_introspection(struct domain *d)
++void p2m_mem_access_emulate_check(struct vcpu *v,
++                                  const vm_event_response_t *rsp)
+ {
+-    /* No special setup on ARM. */
++    /* Not supported on ARM. */
+ }
+ 
+ #define p2m_is_foreign(_t)  ((_t) == p2m_map_foreign)
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index 9cd06b0..1b93f96 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -330,6 +330,26 @@ struct arch_domain
+     unsigned long pirq_eoi_map_mfn;
+ 
+     unsigned int psr_rmid; /* RMID assigned to the domain for CMT */
++
++    /* Monitor options */
++    struct {
++        uint16_t mov_to_cr0_enabled          : 1;
++        uint16_t mov_to_cr0_sync             : 1;
++        uint16_t mov_to_cr0_onchangeonly     : 1;
++        uint16_t mov_to_cr3_enabled          : 1;
++        uint16_t mov_to_cr3_sync             : 1;
++        uint16_t mov_to_cr3_onchangeonly     : 1;
++        uint16_t mov_to_cr4_enabled          : 1;
++        uint16_t mov_to_cr4_sync             : 1;
++        uint16_t mov_to_cr4_onchangeonly     : 1;
++        uint16_t mov_to_msr_enabled          : 1;
++        uint16_t mov_to_msr_extended         : 1;
++        uint16_t singlestep_enabled          : 1;
++        uint16_t software_breakpoint_enabled : 1;
++    } monitor;
++
++    /* Mem_access emulation control */
++    bool_t mem_access_emulate_enabled;
+ } __cacheline_aligned;
+ 
+ #define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
+diff --git a/xen/include/asm-x86/hvm/domain.h b/xen/include/asm-x86/hvm/domain.h
+index 0d0b392..0e4933c 100644
+--- a/xen/include/asm-x86/hvm/domain.h
++++ b/xen/include/asm-x86/hvm/domain.h
+@@ -135,7 +135,6 @@ struct hvm_domain {
+     bool_t                 mem_sharing_enabled;
+     bool_t                 qemu_mapcache_invalidate;
+     bool_t                 is_s3_suspended;
+-    bool_t                 introspection_enabled;
+ 
+     /*
+      * TSC value that VCPUs use to calculate their tsc_offset value.
+diff --git a/xen/include/asm-x86/monitor.h b/xen/include/asm-x86/monitor.h
+new file mode 100644
+index 0000000..21b3e5b
+--- /dev/null
++++ b/xen/include/asm-x86/monitor.h
+@@ -0,0 +1,31 @@
++/*
++ * include/asm-x86/monitor.h
++ *
++ * Architecture-specific monitor_op domctl handler.
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public
++ * License v2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 021110-1307, USA.
++ */
++
++#ifndef __ASM_X86_MONITOR_H__
++#define __ASM_X86_MONITOR_H__
++
++struct domain;
++struct xen_domctl_monitor_op;
++
++int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *op);
++
++#endif /* __ASM_X86_MONITOR_H__ */
+diff --git a/xen/include/asm-x86/p2m.h b/xen/include/asm-x86/p2m.h
+index f1109f4..0b000ac 100644
+--- a/xen/include/asm-x86/p2m.h
++++ b/xen/include/asm-x86/p2m.h
+@@ -584,24 +584,39 @@ long p2m_set_mem_access(struct domain *d, unsigned long start_pfn, uint32_t nr,
+ int p2m_get_mem_access(struct domain *d, unsigned long pfn,
+                        xenmem_access_t *access);
+ 
+-/* Check for emulation and mark vcpu for skipping one instruction
+- * upon rescheduling if required. */
+-void p2m_mem_access_emulate_check(struct vcpu *v,
+-                                  const vm_event_response_t *rsp);
++/*
++ * Emulating a memory access requires custom handling. These non-atomic
++ * functions should be called under domctl lock.
++ */
++static inline
++int p2m_mem_access_enable_emulate(struct domain *d)
++{
++    if ( d->arch.mem_access_emulate_enabled )
++        return -EEXIST;
+ 
+-/* Enable arch specific introspection options (such as MSR interception). */
+-void p2m_setup_introspection(struct domain *d);
++    d->arch.mem_access_emulate_enabled = 1;
++    return 0;
++}
+ 
+-/* Sanity check for vm_event hardware support */
+-static inline bool_t p2m_vm_event_sanity_check(struct domain *d)
++static inline
++int p2m_mem_access_disable_emulate(struct domain *d)
+ {
+-    return hap_enabled(d) && cpu_has_vmx;
++    if ( !d->arch.mem_access_emulate_enabled )
++        return -EEXIST;
++
++    d->arch.mem_access_emulate_enabled = 0;
++    return 0;
+ }
+ 
++/* Check for emulation and mark vcpu for skipping one instruction
++ * upon rescheduling if required. */
++void p2m_mem_access_emulate_check(struct vcpu *v,
++                                  const vm_event_response_t *rsp);
++
+ /* Sanity check for mem_access hardware support */
+ static inline bool_t p2m_mem_access_sanity_check(struct domain *d)
+ {
+-    return is_hvm_domain(d);
++    return is_hvm_domain(d) && cpu_has_vmx && hap_enabled(d);
+ }
+ 
+ /* 
+diff --git a/xen/include/public/domctl.h b/xen/include/public/domctl.h
+index 65a3605..637b137 100644
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -805,7 +805,6 @@ struct xen_domctl_gdbsx_domstatus {
+ 
+ #define XEN_VM_EVENT_MONITOR_ENABLE                           0
+ #define XEN_VM_EVENT_MONITOR_DISABLE                          1
+-#define XEN_VM_EVENT_MONITOR_ENABLE_INTROSPECTION             2
+ 
+ /*
+  * Sharing ENOMEM helper.
+@@ -1003,6 +1002,51 @@ struct xen_domctl_psr_cmt_op {
+ typedef struct xen_domctl_psr_cmt_op xen_domctl_psr_cmt_op_t;
+ DEFINE_XEN_GUEST_HANDLE(xen_domctl_psr_cmt_op_t);
+ 
++/*  XEN_DOMCTL_MONITOR_*
++ *
++ * Enable/disable monitoring various VM events.
++ * This domctl configures what events will be reported to helper apps
++ * via the ring buffer "MONITOR". The ring has to be first enabled
++ * with the domctl XEN_DOMCTL_VM_EVENT_OP_MONITOR.
++ *
++ * NOTICE: mem_access events are also delivered via the "MONITOR" ring buffer;
++ * however, enabling/disabling those events is performed with the use of
++ * memory_op hypercalls!
++ */
++#define XEN_DOMCTL_MONITOR_OP_ENABLE   0
++#define XEN_DOMCTL_MONITOR_OP_DISABLE  1
++
++#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR0            0
++#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR3            1
++#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR4            2
++#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR            3
++#define XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP            4
++#define XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT   5
++
++struct xen_domctl_monitor_op {
++    uint32_t op; /* XEN_DOMCTL_MONITOR_OP_* */
++    uint32_t event; /* XEN_DOMCTL_MONITOR_EVENT_* */
++
++    /*
++     * Further options when issuing XEN_DOMCTL_MONITOR_OP_ENABLE.
++     */
++    union {
++        struct {
++            /* Pause vCPU until response */
++            uint8_t sync;
++            /* Send event only on a change of value */
++            uint8_t onchangeonly;
++        } mov_to_cr;
++
++        struct {
++            /* Enable the capture of an extended set of MSRs */
++            uint8_t extended_capture;
++        } mov_to_msr;
++    } u;
++};
++typedef struct xen_domctl__op xen_domctl_monitor_op_t;
++DEFINE_XEN_GUEST_HANDLE(xen_domctl_monitor_op_t);
++
+ /*
+  * Return information about the state and running time of a domain.
+  * The "domain runstate" is based on the runstates of all the vcpus of the
+@@ -1125,6 +1169,7 @@ struct xen_domctl {
+ #define XEN_DOMCTL_setvnumainfo                  74
+ #define XEN_DOMCTL_psr_cmt_op                    75
+ #define XEN_DOMCTL_arm_configure_domain          76
++#define XEN_DOMCTL_monitor_op                    77
+ #define XEN_DOMCTL_get_runstate_info             98
+ #define XEN_DOMCTL_gdbsx_guestmemio            1000
+ #define XEN_DOMCTL_gdbsx_pausevcpu             1001
+@@ -1194,6 +1239,7 @@ struct xen_domctl {
+         struct xen_domctl_gdbsx_domstatus   gdbsx_domstatus;
+         struct xen_domctl_vnuma             vnuma;
+         struct xen_domctl_psr_cmt_op        psr_cmt_op;
++        struct xen_domctl_monitor_op        monitor_op;
+         uint8_t                             pad[128];
+     } u;
+ };
+diff --git a/xen/include/public/hvm/params.h b/xen/include/public/hvm/params.h
+index f67a5a4..636c057 100644
+--- a/xen/include/public/hvm/params.h
++++ b/xen/include/public/hvm/params.h
+@@ -169,8 +169,7 @@
+  */
+ #define HVM_PARAM_ACPI_IOPORTS_LOCATION 19
+ 
+-/* Enable blocking memory events, async or sync (pause vcpu until response) 
+- * onchangeonly indicates messages only on a change of value */
++/* Deprecated */
+ #define HVM_PARAM_MEMORY_EVENT_CR0          20
+ #define HVM_PARAM_MEMORY_EVENT_CR3          21
+ #define HVM_PARAM_MEMORY_EVENT_CR4          22
+@@ -178,12 +177,6 @@
+ #define HVM_PARAM_MEMORY_EVENT_SINGLE_STEP  25
+ #define HVM_PARAM_MEMORY_EVENT_MSR          30
+ 
+-#define HVMPME_MODE_MASK       (3 << 0)
+-#define HVMPME_mode_disabled   0
+-#define HVMPME_mode_async      1
+-#define HVMPME_mode_sync       2
+-#define HVMPME_onchangeonly    (1 << 2)
+-
+ /* Boolean: Enable nestedhvm (hvm only) */
+ #define HVM_PARAM_NESTEDHVM    24
+ 
+diff --git a/xen/include/public/memory.h b/xen/include/public/memory.h
+index 868ecaa..515cf29 100644
+--- a/xen/include/public/memory.h
++++ b/xen/include/public/memory.h
+@@ -392,6 +392,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_paging_op_t);
+ #define XENMEM_access_op_resume             0
+ #define XENMEM_access_op_set_access         1
+ #define XENMEM_access_op_get_access         2
++#define XENMEM_access_op_enable_emulate     3
++#define XENMEM_access_op_disable_emulate    4
+ 
+ typedef enum {
+     XENMEM_access_n,
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index 28d8d7a..ed9105b 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -67,7 +67,7 @@
+ #define VM_EVENT_REASON_MOV_TO_CR3              5
+ /* CR4 was updated */
+ #define VM_EVENT_REASON_MOV_TO_CR4              6
+-/* An MSR was updated. Does NOT honour HVMPME_onchangeonly */
++/* An MSR was updated. */
+ #define VM_EVENT_REASON_MOV_TO_MSR              7
+ /* Debug operation executed (e.g. int3) */
+ #define VM_EVENT_REASON_SOFTWARE_BREAKPOINT     8
+diff --git a/xen/xsm/flask/hooks.c b/xen/xsm/flask/hooks.c
+index c419543..266915f 100644
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -691,6 +691,9 @@ static int flask_domctl(struct domain *d, int cmd)
+     case XEN_DOMCTL_set_access_required:
+         return current_has_perm(d, SECCLASS_HVM, HVM__VM_EVENT);
+ 
++    case XEN_DOMCTL_monitor_op:
++        return current_has_perm(d, SECCLASS_HVM, HVM__VM_EVENT);
++
+     case XEN_DOMCTL_debug_op:
+     case XEN_DOMCTL_gdbsx_guestmemio:
+     case XEN_DOMCTL_gdbsx_pausevcpu:
+diff --git a/xen/xsm/flask/policy/access_vectors b/xen/xsm/flask/policy/access_vectors
+index 9da3275..821b787 100644
+--- a/xen/xsm/flask/policy/access_vectors
++++ b/xen/xsm/flask/policy/access_vectors
+@@ -249,6 +249,8 @@ class hvm
+ # HVMOP_inject_trap
+     hvmctl
+ # XEN_DOMCTL_set_access_required
++# XEN_DOMCTL_monitor_op
++# XEN_DOMCTL_vm_event_op
+     vm_event
+ # XEN_DOMCTL_mem_sharing_op and XENMEM_sharing_op_{share,add_physmap} with:
+ #  source = the domain making the hypercall
+-- 
+2.4.5
+

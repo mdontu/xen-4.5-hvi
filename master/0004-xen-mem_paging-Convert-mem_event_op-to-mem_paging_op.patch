@@ -1,0 +1,361 @@
+From 4e4a28424e89329b5b83c8d7c4d8e4ff32f0756a Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Date: Thu, 26 Mar 2015 22:06:55 +0100
+Subject: [PATCH 04/22] xen/mem_paging: Convert mem_event_op to mem_paging_op
+ and cleanup
+
+The only use-case of the mem_event_op structure had been in mem_paging,
+thus renaming the structure mem_paging_op and relocating its associated
+functions clarifies its actual usage.
+
+As part of this fix-up we also convert the gfn's in the toolstack to be
+explicitely 64-bit wide and clean the code a bit.
+
+Signed-off-by: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Acked-by: Tim Deegan <tim@xen.org>
+Acked-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+---
+ tools/libxc/include/xenctrl.h    | 10 +++----
+ tools/libxc/xc_mem_event.c       | 16 ------------
+ tools/libxc/xc_mem_paging.c      | 56 +++++++++++++++++++++++-----------------
+ tools/libxc/xc_private.h         |  3 ---
+ xen/arch/x86/mm/mem_paging.c     | 32 ++++++++++-------------
+ xen/arch/x86/x86_64/compat/mm.c  | 10 ++++---
+ xen/arch/x86/x86_64/mm.c         |  8 +++---
+ xen/common/mem_event.c           |  4 +--
+ xen/include/asm-x86/mem_paging.h |  5 +++-
+ xen/include/public/memory.h      |  9 +++----
+ 10 files changed, 71 insertions(+), 82 deletions(-)
+
+diff --git a/tools/libxc/include/xenctrl.h b/tools/libxc/include/xenctrl.h
+index c32ee86..516937c 100644
+--- a/tools/libxc/include/xenctrl.h
++++ b/tools/libxc/include/xenctrl.h
+@@ -2312,11 +2312,11 @@ int xc_tmem_restore_extra(xc_interface *xch, int dom, int fd);
+ int xc_mem_paging_enable(xc_interface *xch, domid_t domain_id, uint32_t *port);
+ int xc_mem_paging_disable(xc_interface *xch, domid_t domain_id);
+ int xc_mem_paging_nominate(xc_interface *xch, domid_t domain_id,
+-                           unsigned long gfn);
+-int xc_mem_paging_evict(xc_interface *xch, domid_t domain_id, unsigned long gfn);
+-int xc_mem_paging_prep(xc_interface *xch, domid_t domain_id, unsigned long gfn);
+-int xc_mem_paging_load(xc_interface *xch, domid_t domain_id, 
+-                        unsigned long gfn, void *buffer);
++                           uint64_t gfn);
++int xc_mem_paging_evict(xc_interface *xch, domid_t domain_id, uint64_t gfn);
++int xc_mem_paging_prep(xc_interface *xch, domid_t domain_id, uint64_t gfn);
++int xc_mem_paging_load(xc_interface *xch, domid_t domain_id,
++                       uint64_t gfn, void *buffer);
+ 
+ /** 
+  * Access tracking operations.
+diff --git a/tools/libxc/xc_mem_event.c b/tools/libxc/xc_mem_event.c
+index 4bb120d..487fcee 100644
+--- a/tools/libxc/xc_mem_event.c
++++ b/tools/libxc/xc_mem_event.c
+@@ -40,22 +40,6 @@ int xc_mem_event_control(xc_interface *xch, domid_t domain_id, unsigned int op,
+     return rc;
+ }
+ 
+-int xc_mem_event_memop(xc_interface *xch, domid_t domain_id, 
+-                        unsigned int op, unsigned int mode,
+-                        uint64_t gfn, void *buffer)
+-{
+-    xen_mem_event_op_t meo;
+-
+-    memset(&meo, 0, sizeof(meo));
+-
+-    meo.op      = op;
+-    meo.domain  = domain_id;
+-    meo.gfn     = gfn;
+-    meo.buffer  = (unsigned long) buffer;
+-
+-    return do_memory_op(xch, mode, &meo, sizeof(meo));
+-}
+-
+ void *xc_mem_event_enable(xc_interface *xch, domid_t domain_id, int param,
+                           uint32_t *port, int enable_introspection)
+ {
+diff --git a/tools/libxc/xc_mem_paging.c b/tools/libxc/xc_mem_paging.c
+index 5194423..32c4703 100644
+--- a/tools/libxc/xc_mem_paging.c
++++ b/tools/libxc/xc_mem_paging.c
+@@ -23,6 +23,20 @@
+ 
+ #include "xc_private.h"
+ 
++static int xc_mem_paging_memop(xc_interface *xch, domid_t domain_id,
++                               unsigned int op, uint64_t gfn, void *buffer)
++{
++    xen_mem_paging_op_t mpo;
++
++    memset(&mpo, 0, sizeof(mpo));
++
++    mpo.op      = op;
++    mpo.domain  = domain_id;
++    mpo.gfn     = gfn;
++    mpo.buffer  = (unsigned long) buffer;
++
++    return do_memory_op(xch, XENMEM_paging_op, &mpo, sizeof(mpo));
++}
+ 
+ int xc_mem_paging_enable(xc_interface *xch, domid_t domain_id,
+                          uint32_t *port)
+@@ -32,7 +46,7 @@ int xc_mem_paging_enable(xc_interface *xch, domid_t domain_id,
+         errno = EINVAL;
+         return -1;
+     }
+-        
++
+     return xc_mem_event_control(xch, domain_id,
+                                 XEN_MEM_EVENT_PAGING_ENABLE,
+                                 XEN_DOMCTL_MEM_EVENT_OP_PAGING,
+@@ -47,32 +61,29 @@ int xc_mem_paging_disable(xc_interface *xch, domid_t domain_id)
+                                 NULL);
+ }
+ 
+-int xc_mem_paging_nominate(xc_interface *xch, domid_t domain_id, unsigned long gfn)
++int xc_mem_paging_nominate(xc_interface *xch, domid_t domain_id, uint64_t gfn)
+ {
+-    return xc_mem_event_memop(xch, domain_id,
+-                                XENMEM_paging_op_nominate,
+-                                XENMEM_paging_op,
+-                                gfn, NULL);
++    return xc_mem_paging_memop(xch, domain_id,
++                               XENMEM_paging_op_nominate,
++                               gfn, NULL);
+ }
+ 
+-int xc_mem_paging_evict(xc_interface *xch, domid_t domain_id, unsigned long gfn)
++int xc_mem_paging_evict(xc_interface *xch, domid_t domain_id, uint64_t gfn)
+ {
+-    return xc_mem_event_memop(xch, domain_id,
+-                                XENMEM_paging_op_evict,
+-                                XENMEM_paging_op,
+-                                gfn, NULL);
++    return xc_mem_paging_memop(xch, domain_id,
++                               XENMEM_paging_op_evict,
++                               gfn, NULL);
+ }
+ 
+-int xc_mem_paging_prep(xc_interface *xch, domid_t domain_id, unsigned long gfn)
++int xc_mem_paging_prep(xc_interface *xch, domid_t domain_id, uint64_t gfn)
+ {
+-    return xc_mem_event_memop(xch, domain_id,
+-                                XENMEM_paging_op_prep,
+-                                XENMEM_paging_op,
+-                                gfn, NULL);
++    return xc_mem_paging_memop(xch, domain_id,
++                               XENMEM_paging_op_prep,
++                               gfn, NULL);
+ }
+ 
+-int xc_mem_paging_load(xc_interface *xch, domid_t domain_id, 
+-                                unsigned long gfn, void *buffer)
++int xc_mem_paging_load(xc_interface *xch, domid_t domain_id,
++                       uint64_t gfn, void *buffer)
+ {
+     int rc, old_errno;
+ 
+@@ -86,11 +97,10 @@ int xc_mem_paging_load(xc_interface *xch, domid_t domain_id,
+ 
+     if ( mlock(buffer, XC_PAGE_SIZE) )
+         return -1;
+-        
+-    rc = xc_mem_event_memop(xch, domain_id,
+-                                XENMEM_paging_op_prep,
+-                                XENMEM_paging_op,
+-                                gfn, buffer);
++
++    rc = xc_mem_paging_memop(xch, domain_id,
++                             XENMEM_paging_op_prep,
++                             gfn, buffer);
+ 
+     old_errno = errno;
+     munlock(buffer, XC_PAGE_SIZE);
+diff --git a/tools/libxc/xc_private.h b/tools/libxc/xc_private.h
+index de38dc0..634db5d 100644
+--- a/tools/libxc/xc_private.h
++++ b/tools/libxc/xc_private.h
+@@ -440,9 +440,6 @@ int xc_ffs64(uint64_t x);
+  */
+ int xc_mem_event_control(xc_interface *xch, domid_t domain_id, unsigned int op,
+                          unsigned int mode, uint32_t *port);
+-int xc_mem_event_memop(xc_interface *xch, domid_t domain_id,
+-                        unsigned int op, unsigned int mode,
+-                        uint64_t gfn, void *buffer);
+ /*
+  * Enables mem_event and returns the mapped ring page indicated by param.
+  * param can be HVM_PARAM_PAGING/ACCESS/SHARING_RING_PFN
+diff --git a/xen/arch/x86/mm/mem_paging.c b/xen/arch/x86/mm/mem_paging.c
+index 65f6a3d..87a7b72 100644
+--- a/xen/arch/x86/mm/mem_paging.c
++++ b/xen/arch/x86/mm/mem_paging.c
+@@ -25,38 +25,32 @@
+ #include <xen/mem_event.h>
+ 
+ 
+-int mem_paging_memop(struct domain *d, xen_mem_event_op_t *mec)
++int mem_paging_memop(struct domain *d, xen_mem_paging_op_t *mpo)
+ {
++    int rc = -ENODEV;
+     if ( unlikely(!d->mem_event->paging.ring_page) )
+-        return -ENODEV;
++        return rc;
+ 
+-    switch( mec->op )
++    switch( mpo->op )
+     {
+     case XENMEM_paging_op_nominate:
+-    {
+-        unsigned long gfn = mec->gfn;
+-        return p2m_mem_paging_nominate(d, gfn);
+-    }
+-    break;
++        rc = p2m_mem_paging_nominate(d, mpo->gfn);
++        break;
+ 
+     case XENMEM_paging_op_evict:
+-    {
+-        unsigned long gfn = mec->gfn;
+-        return p2m_mem_paging_evict(d, gfn);
+-    }
+-    break;
++        rc = p2m_mem_paging_evict(d, mpo->gfn);
++        break;
+ 
+     case XENMEM_paging_op_prep:
+-    {
+-        unsigned long gfn = mec->gfn;
+-        return p2m_mem_paging_prep(d, gfn, mec->buffer);
+-    }
+-    break;
++        rc = p2m_mem_paging_prep(d, mpo->gfn, mpo->buffer);
++        break;
+ 
+     default:
+-        return -ENOSYS;
++        rc = -ENOSYS;
+         break;
+     }
++
++    return rc;
+ }
+ 
+ 
+diff --git a/xen/arch/x86/x86_64/compat/mm.c b/xen/arch/x86/x86_64/compat/mm.c
+index f90f611..96cec31 100644
+--- a/xen/arch/x86/x86_64/compat/mm.c
++++ b/xen/arch/x86/x86_64/compat/mm.c
+@@ -188,11 +188,12 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+ 
+     case XENMEM_paging_op:
+     {
+-        xen_mem_event_op_t meo;
+-        if ( copy_from_guest(&meo, arg, 1) )
++        xen_mem_paging_op_t mpo;
++
++        if ( copy_from_guest(&mpo, arg, 1) )
+             return -EFAULT;
+-        rc = do_mem_event_op(cmd, meo.domain, &meo);
+-        if ( !rc && __copy_to_guest(arg, &meo, 1) )
++        rc = do_mem_event_op(cmd, mpo.domain, &mpo);
++        if ( !rc && __copy_to_guest(arg, &mpo, 1) )
+             return -EFAULT;
+         break;
+     }
+@@ -200,6 +201,7 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+     case XENMEM_sharing_op:
+     {
+         xen_mem_sharing_op_t mso;
++
+         if ( copy_from_guest(&mso, arg, 1) )
+             return -EFAULT;
+         if ( mso.op == XENMEM_sharing_op_audit )
+diff --git a/xen/arch/x86/x86_64/mm.c b/xen/arch/x86/x86_64/mm.c
+index d631aee..2fa1f67 100644
+--- a/xen/arch/x86/x86_64/mm.c
++++ b/xen/arch/x86/x86_64/mm.c
+@@ -985,11 +985,11 @@ long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+ 
+     case XENMEM_paging_op:
+     {
+-        xen_mem_event_op_t meo;
+-        if ( copy_from_guest(&meo, arg, 1) )
++        xen_mem_paging_op_t mpo;
++        if ( copy_from_guest(&mpo, arg, 1) )
+             return -EFAULT;
+-        rc = do_mem_event_op(cmd, meo.domain, &meo);
+-        if ( !rc && __copy_to_guest(arg, &meo, 1) )
++        rc = do_mem_event_op(cmd, mpo.domain, &mpo);
++        if ( !rc && __copy_to_guest(arg, &mpo, 1) )
+             return -EFAULT;
+         break;
+     }
+diff --git a/xen/common/mem_event.c b/xen/common/mem_event.c
+index 370ec81..f32f8ae 100644
+--- a/xen/common/mem_event.c
++++ b/xen/common/mem_event.c
+@@ -476,12 +476,12 @@ int do_mem_event_op(int op, uint32_t domain, void *arg)
+     {
+ #ifdef HAS_MEM_PAGING
+         case XENMEM_paging_op:
+-            ret = mem_paging_memop(d, (xen_mem_event_op_t *) arg);
++            ret = mem_paging_memop(d, arg);
+             break;
+ #endif
+ #ifdef HAS_MEM_SHARING
+         case XENMEM_sharing_op:
+-            ret = mem_sharing_memop(d, (xen_mem_sharing_op_t *) arg);
++            ret = mem_sharing_memop(d, arg);
+             break;
+ #endif
+         default:
+diff --git a/xen/include/asm-x86/mem_paging.h b/xen/include/asm-x86/mem_paging.h
+index 6b7a1fe..5f0f91b 100644
+--- a/xen/include/asm-x86/mem_paging.h
++++ b/xen/include/asm-x86/mem_paging.h
+@@ -20,9 +20,12 @@
+  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  */
+ 
++#ifndef __ASM_X86_MEM_PAGING_H__
++#define __ASM_X86_MEM_PAGING_H__
+ 
+-int mem_paging_memop(struct domain *d, xen_mem_event_op_t *meo);
++int mem_paging_memop(struct domain *d, xen_mem_paging_op_t *mpo);
+ 
++#endif /*__ASM_X86_MEM_PAGING_H__ */
+ 
+ /*
+  * Local variables:
+diff --git a/xen/include/public/memory.h b/xen/include/public/memory.h
+index 5b1311d..868ecaa 100644
+--- a/xen/include/public/memory.h
++++ b/xen/include/public/memory.h
+@@ -376,18 +376,17 @@ typedef struct xen_pod_target xen_pod_target_t;
+ #define XENMEM_paging_op_evict              1
+ #define XENMEM_paging_op_prep               2
+ 
+-struct xen_mem_event_op {
+-    uint8_t     op;         /* XENMEM_*_op_* */
++struct xen_mem_paging_op {
++    uint8_t     op;         /* XENMEM_paging_op_* */
+     domid_t     domain;
+-    
+ 
+     /* PAGING_PREP IN: buffer to immediately fill page in */
+     uint64_aligned_t    buffer;
+     /* Other OPs */
+     uint64_aligned_t    gfn;           /* IN:  gfn of page being operated on */
+ };
+-typedef struct xen_mem_event_op xen_mem_event_op_t;
+-DEFINE_XEN_GUEST_HANDLE(xen_mem_event_op_t);
++typedef struct xen_mem_paging_op xen_mem_paging_op_t;
++DEFINE_XEN_GUEST_HANDLE(xen_mem_paging_op_t);
+ 
+ #define XENMEM_access_op                    21
+ #define XENMEM_access_op_resume             0
+-- 
+2.4.5
+

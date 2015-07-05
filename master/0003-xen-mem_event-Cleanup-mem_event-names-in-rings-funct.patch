@@ -1,0 +1,632 @@
+From 85361ee3a1cb60a84980320262c702e4be45dccc Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Date: Thu, 26 Mar 2015 22:06:54 +0100
+Subject: [PATCH 03/22] xen/mem_event: Cleanup mem_event names in rings,
+ functions and domctls
+
+The name of one of the mem_event rings still implies it is used only
+for memory accesses, which is no longer the case. It is also used to
+deliver various HVM events, thus the name "monitor" is more appropriate
+in this setting.
+
+Couple functions incorrectly labeled as part of mem_event is also renamed
+to reflect that they belong to mem_access.
+
+The mem_event subop definitions are also shortened to be more meaningful.
+
+The tool side changes are only mechanical renaming to match these new names.
+
+Signed-off-by: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Acked-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+---
+ tools/libxc/xc_domain_restore.c   | 14 ++++++-------
+ tools/libxc/xc_domain_save.c      |  4 ++--
+ tools/libxc/xc_hvm_build_x86.c    |  2 +-
+ tools/libxc/xc_mem_access.c       |  8 ++++----
+ tools/libxc/xc_mem_event.c        | 12 +++++------
+ tools/libxc/xc_mem_paging.c       |  4 ++--
+ tools/libxc/xc_memshr.c           |  4 ++--
+ tools/libxc/xg_save_restore.h     |  2 +-
+ xen/arch/x86/hvm/emulate.c        |  2 +-
+ xen/arch/x86/hvm/hvm.c            |  4 ++--
+ xen/arch/x86/hvm/vmx/vmcs.c       |  2 +-
+ xen/arch/x86/mm/p2m.c             | 10 ++++-----
+ xen/common/mem_access.c           | 10 ++++-----
+ xen/common/mem_event.c            | 37 +++++++++++++++++----------------
+ xen/include/asm-arm/p2m.h         |  6 +++---
+ xen/include/asm-x86/hvm/emulate.h |  2 +-
+ xen/include/asm-x86/p2m.h         |  4 ++--
+ xen/include/public/domctl.h       | 43 +++++++++++++++++++++++----------------
+ xen/include/xen/sched.h           |  4 ++--
+ 19 files changed, 92 insertions(+), 82 deletions(-)
+
+diff --git a/tools/libxc/xc_domain_restore.c b/tools/libxc/xc_domain_restore.c
+index e4a742a..b8a8ef4 100644
+--- a/tools/libxc/xc_domain_restore.c
++++ b/tools/libxc/xc_domain_restore.c
+@@ -734,7 +734,7 @@ typedef struct {
+     uint64_t vcpumap[XC_SR_MAX_VCPUS/64];
+     uint64_t identpt;
+     uint64_t paging_ring_pfn;
+-    uint64_t access_ring_pfn;
++    uint64_t monitor_ring_pfn;
+     uint64_t sharing_ring_pfn;
+     uint64_t vm86_tss;
+     uint64_t console_pfn;
+@@ -828,15 +828,15 @@ static int pagebuf_get_one(xc_interface *xch, struct restore_ctx *ctx,
+         // DPRINTF("paging ring pfn address: %llx\n", buf->paging_ring_pfn);
+         return pagebuf_get_one(xch, ctx, buf, fd, dom);
+ 
+-    case XC_SAVE_ID_HVM_ACCESS_RING_PFN:
++    case XC_SAVE_ID_HVM_MONITOR_RING_PFN:
+         /* Skip padding 4 bytes then read the mem access ring location. */
+-        if ( RDEXACT(fd, &buf->access_ring_pfn, sizeof(uint32_t)) ||
+-             RDEXACT(fd, &buf->access_ring_pfn, sizeof(uint64_t)) )
++        if ( RDEXACT(fd, &buf->monitor_ring_pfn, sizeof(uint32_t)) ||
++             RDEXACT(fd, &buf->monitor_ring_pfn, sizeof(uint64_t)) )
+         {
+             PERROR("error read the access ring pfn");
+             return -1;
+         }
+-        // DPRINTF("access ring pfn address: %llx\n", buf->access_ring_pfn);
++        // DPRINTF("monitor ring pfn address: %llx\n", buf->monitor_ring_pfn);
+         return pagebuf_get_one(xch, ctx, buf, fd, dom);
+ 
+     case XC_SAVE_ID_HVM_SHARING_RING_PFN:
+@@ -1669,8 +1669,8 @@ int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
+                 xc_hvm_param_set(xch, dom, HVM_PARAM_IDENT_PT, pagebuf.identpt);
+             if ( pagebuf.paging_ring_pfn )
+                 xc_hvm_param_set(xch, dom, HVM_PARAM_PAGING_RING_PFN, pagebuf.paging_ring_pfn);
+-            if ( pagebuf.access_ring_pfn )
+-                xc_hvm_param_set(xch, dom, HVM_PARAM_ACCESS_RING_PFN, pagebuf.access_ring_pfn);
++            if ( pagebuf.monitor_ring_pfn )
++                xc_hvm_param_set(xch, dom, HVM_PARAM_MONITOR_RING_PFN, pagebuf.monitor_ring_pfn);
+             if ( pagebuf.sharing_ring_pfn )
+                 xc_hvm_param_set(xch, dom, HVM_PARAM_SHARING_RING_PFN, pagebuf.sharing_ring_pfn);
+             if ( pagebuf.vm86_tss )
+diff --git a/tools/libxc/xc_domain_save.c b/tools/libxc/xc_domain_save.c
+index f9a724b..301e770 100644
+--- a/tools/libxc/xc_domain_save.c
++++ b/tools/libxc/xc_domain_save.c
+@@ -1675,9 +1675,9 @@ int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom, uint32_t max_iter
+             goto out;
+         }
+ 
+-        chunk.id = XC_SAVE_ID_HVM_ACCESS_RING_PFN;
++        chunk.id = XC_SAVE_ID_HVM_MONITOR_RING_PFN;
+         chunk.data = 0;
+-        xc_hvm_param_get(xch, dom, HVM_PARAM_ACCESS_RING_PFN, &chunk.data);
++        xc_hvm_param_get(xch, dom, HVM_PARAM_MONITOR_RING_PFN, &chunk.data);
+ 
+         if ( (chunk.data != 0) &&
+              wrexact(io_fd, &chunk, sizeof(chunk)) )
+diff --git a/tools/libxc/xc_hvm_build_x86.c b/tools/libxc/xc_hvm_build_x86.c
+index c81a25b..30a929d 100644
+--- a/tools/libxc/xc_hvm_build_x86.c
++++ b/tools/libxc/xc_hvm_build_x86.c
+@@ -497,7 +497,7 @@ static int setup_guest(xc_interface *xch,
+                      special_pfn(SPECIALPAGE_CONSOLE));
+     xc_hvm_param_set(xch, dom, HVM_PARAM_PAGING_RING_PFN,
+                      special_pfn(SPECIALPAGE_PAGING));
+-    xc_hvm_param_set(xch, dom, HVM_PARAM_ACCESS_RING_PFN,
++    xc_hvm_param_set(xch, dom, HVM_PARAM_MONITOR_RING_PFN,
+                      special_pfn(SPECIALPAGE_ACCESS));
+     xc_hvm_param_set(xch, dom, HVM_PARAM_SHARING_RING_PFN,
+                      special_pfn(SPECIALPAGE_SHARING));
+diff --git a/tools/libxc/xc_mem_access.c b/tools/libxc/xc_mem_access.c
+index 55d0e9f..446394b 100644
+--- a/tools/libxc/xc_mem_access.c
++++ b/tools/libxc/xc_mem_access.c
+@@ -26,22 +26,22 @@
+ 
+ void *xc_mem_access_enable(xc_interface *xch, domid_t domain_id, uint32_t *port)
+ {
+-    return xc_mem_event_enable(xch, domain_id, HVM_PARAM_ACCESS_RING_PFN,
++    return xc_mem_event_enable(xch, domain_id, HVM_PARAM_MONITOR_RING_PFN,
+                                port, 0);
+ }
+ 
+ void *xc_mem_access_enable_introspection(xc_interface *xch, domid_t domain_id,
+                                          uint32_t *port)
+ {
+-    return xc_mem_event_enable(xch, domain_id, HVM_PARAM_ACCESS_RING_PFN,
++    return xc_mem_event_enable(xch, domain_id, HVM_PARAM_MONITOR_RING_PFN,
+                                port, 1);
+ }
+ 
+ int xc_mem_access_disable(xc_interface *xch, domid_t domain_id)
+ {
+     return xc_mem_event_control(xch, domain_id,
+-                                XEN_DOMCTL_MEM_EVENT_OP_ACCESS_DISABLE,
+-                                XEN_DOMCTL_MEM_EVENT_OP_ACCESS,
++                                XEN_MEM_EVENT_MONITOR_DISABLE,
++                                XEN_DOMCTL_MEM_EVENT_OP_MONITOR,
+                                 NULL);
+ }
+ 
+diff --git a/tools/libxc/xc_mem_event.c b/tools/libxc/xc_mem_event.c
+index 8c0be4e..4bb120d 100644
+--- a/tools/libxc/xc_mem_event.c
++++ b/tools/libxc/xc_mem_event.c
+@@ -115,20 +115,20 @@ void *xc_mem_event_enable(xc_interface *xch, domid_t domain_id, int param,
+     switch ( param )
+     {
+     case HVM_PARAM_PAGING_RING_PFN:
+-        op = XEN_DOMCTL_MEM_EVENT_OP_PAGING_ENABLE;
++        op = XEN_MEM_EVENT_PAGING_ENABLE;
+         mode = XEN_DOMCTL_MEM_EVENT_OP_PAGING;
+         break;
+ 
+-    case HVM_PARAM_ACCESS_RING_PFN:
++    case HVM_PARAM_MONITOR_RING_PFN:
+         if ( enable_introspection )
+-            op = XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE_INTROSPECTION;
++            op = XEN_MEM_EVENT_MONITOR_ENABLE_INTROSPECTION;
+         else
+-            op = XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE;
+-        mode = XEN_DOMCTL_MEM_EVENT_OP_ACCESS;
++            op = XEN_MEM_EVENT_MONITOR_ENABLE;
++        mode = XEN_DOMCTL_MEM_EVENT_OP_MONITOR;
+         break;
+ 
+     case HVM_PARAM_SHARING_RING_PFN:
+-        op = XEN_DOMCTL_MEM_EVENT_OP_SHARING_ENABLE;
++        op = XEN_MEM_EVENT_SHARING_ENABLE;
+         mode = XEN_DOMCTL_MEM_EVENT_OP_SHARING;
+         break;
+ 
+diff --git a/tools/libxc/xc_mem_paging.c b/tools/libxc/xc_mem_paging.c
+index 8aa7d4d..5194423 100644
+--- a/tools/libxc/xc_mem_paging.c
++++ b/tools/libxc/xc_mem_paging.c
+@@ -34,7 +34,7 @@ int xc_mem_paging_enable(xc_interface *xch, domid_t domain_id,
+     }
+         
+     return xc_mem_event_control(xch, domain_id,
+-                                XEN_DOMCTL_MEM_EVENT_OP_PAGING_ENABLE,
++                                XEN_MEM_EVENT_PAGING_ENABLE,
+                                 XEN_DOMCTL_MEM_EVENT_OP_PAGING,
+                                 port);
+ }
+@@ -42,7 +42,7 @@ int xc_mem_paging_enable(xc_interface *xch, domid_t domain_id,
+ int xc_mem_paging_disable(xc_interface *xch, domid_t domain_id)
+ {
+     return xc_mem_event_control(xch, domain_id,
+-                                XEN_DOMCTL_MEM_EVENT_OP_PAGING_DISABLE,
++                                XEN_MEM_EVENT_PAGING_DISABLE,
+                                 XEN_DOMCTL_MEM_EVENT_OP_PAGING,
+                                 NULL);
+ }
+diff --git a/tools/libxc/xc_memshr.c b/tools/libxc/xc_memshr.c
+index d6a9539..4398630 100644
+--- a/tools/libxc/xc_memshr.c
++++ b/tools/libxc/xc_memshr.c
+@@ -53,7 +53,7 @@ int xc_memshr_ring_enable(xc_interface *xch,
+     }
+         
+     return xc_mem_event_control(xch, domid,
+-                                XEN_DOMCTL_MEM_EVENT_OP_SHARING_ENABLE,
++                                XEN_MEM_EVENT_SHARING_ENABLE,
+                                 XEN_DOMCTL_MEM_EVENT_OP_SHARING,
+                                 port);
+ }
+@@ -62,7 +62,7 @@ int xc_memshr_ring_disable(xc_interface *xch,
+                            domid_t domid)
+ {
+     return xc_mem_event_control(xch, domid,
+-                                XEN_DOMCTL_MEM_EVENT_OP_SHARING_DISABLE,
++                                XEN_MEM_EVENT_SHARING_DISABLE,
+                                 XEN_DOMCTL_MEM_EVENT_OP_SHARING,
+                                 NULL);
+ }
+diff --git a/tools/libxc/xg_save_restore.h b/tools/libxc/xg_save_restore.h
+index 832c329..57d4e8f 100644
+--- a/tools/libxc/xg_save_restore.h
++++ b/tools/libxc/xg_save_restore.h
+@@ -256,7 +256,7 @@
+ #define XC_SAVE_ID_HVM_GENERATION_ID_ADDR -14
+ /* Markers for the pfn's hosting these mem event rings */
+ #define XC_SAVE_ID_HVM_PAGING_RING_PFN  -15
+-#define XC_SAVE_ID_HVM_ACCESS_RING_PFN  -16
++#define XC_SAVE_ID_HVM_MONITOR_RING_PFN -16
+ #define XC_SAVE_ID_HVM_SHARING_RING_PFN -17
+ #define XC_SAVE_ID_TOOLSTACK          -18 /* Optional toolstack specific info */
+ /* These are a pair; it is an error for one to exist without the other */
+diff --git a/xen/arch/x86/hvm/emulate.c b/xen/arch/x86/hvm/emulate.c
+index 14c1847..f2e72dc 100644
+--- a/xen/arch/x86/hvm/emulate.c
++++ b/xen/arch/x86/hvm/emulate.c
+@@ -1401,7 +1401,7 @@ int hvm_emulate_one_no_write(
+     return _hvm_emulate_one(hvmemul_ctxt, &hvm_emulate_ops_no_write);
+ }
+ 
+-void hvm_mem_event_emulate_one(bool_t nowrite, unsigned int trapnr,
++void hvm_mem_access_emulate_one(bool_t nowrite, unsigned int trapnr,
+     unsigned int errcode)
+ {
+     struct hvm_emulate_ctxt ctx = {{ 0 }};
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index f973939..6f4abcd 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -6398,7 +6398,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+     if ( !(parameters & HVMPME_MODE_MASK) )
+         return 0;
+ 
+-    rc = mem_event_claim_slot(d, &d->mem_event->access);
++    rc = mem_event_claim_slot(d, &d->mem_event->monitor);
+     if ( rc == -ENOSYS )
+     {
+         /* If there was no ring to handle the event, then
+@@ -6415,7 +6415,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+     }
+ 
+     hvm_mem_event_fill_regs(req);
+-    mem_event_put_request(d, &d->mem_event->access, req);
++    mem_event_put_request(d, &d->mem_event->monitor, req);
+ 
+     return 1;
+ }
+diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
+index f0b5142..34de069 100644
+--- a/xen/arch/x86/hvm/vmx/vmcs.c
++++ b/xen/arch/x86/hvm/vmx/vmcs.c
+@@ -715,7 +715,7 @@ void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
+         return;
+ 
+     if ( unlikely(d->arch.hvm_domain.introspection_enabled) &&
+-         mem_event_check_ring(&d->mem_event->access) )
++         mem_event_check_ring(&d->mem_event->monitor) )
+     {
+         unsigned int i;
+ 
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index 0937994..4d6d5bd 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1395,7 +1395,7 @@ static void p2m_mem_event_fill_regs(mem_event_request_t *req)
+     req->regs.x86.cs_arbytes = seg.attr.bytes;
+ }
+ 
+-void p2m_mem_event_emulate_check(struct vcpu *v,
++void p2m_mem_access_emulate_check(struct vcpu *v,
+                                  const mem_event_response_t *rsp)
+ {
+     /* Mark vcpu for skipping one instruction upon rescheduling. */
+@@ -1497,7 +1497,7 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+     gfn_unlock(p2m, gfn, 0);
+ 
+     /* Otherwise, check if there is a memory event listener, and send the message along */
+-    if ( !mem_event_check_ring(&d->mem_event->access) || !req_ptr ) 
++    if ( !mem_event_check_ring(&d->mem_event->monitor) || !req_ptr ) 
+     {
+         /* No listener */
+         if ( p2m->access_required ) 
+@@ -1542,9 +1542,9 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+ 
+     if ( v->arch.mem_event.emulate_flags )
+     {
+-        hvm_mem_event_emulate_one((v->arch.mem_event.emulate_flags &
+-                                   MEM_ACCESS_EMULATE_NOWRITE) != 0,
+-                                  TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
++        hvm_mem_access_emulate_one((v->arch.mem_event.emulate_flags &
++                                    MEM_ACCESS_EMULATE_NOWRITE) != 0,
++                                   TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
+ 
+         v->arch.mem_event.emulate_flags = 0;
+         return 1;
+diff --git a/xen/common/mem_access.c b/xen/common/mem_access.c
+index 9c5b7a6..19be7d7 100644
+--- a/xen/common/mem_access.c
++++ b/xen/common/mem_access.c
+@@ -34,7 +34,7 @@ void mem_access_resume(struct domain *d)
+     mem_event_response_t rsp;
+ 
+     /* Pull all responses off the ring. */
+-    while ( mem_event_get_response(d, &d->mem_event->access, &rsp) )
++    while ( mem_event_get_response(d, &d->mem_event->monitor, &rsp) )
+     {
+         struct vcpu *v;
+ 
+@@ -53,7 +53,7 @@ void mem_access_resume(struct domain *d)
+ 
+         v = d->vcpu[rsp.vcpu_id];
+ 
+-        p2m_mem_event_emulate_check(v, &rsp);
++        p2m_mem_access_emulate_check(v, &rsp);
+ 
+         /* Unpause domain. */
+         if ( rsp.flags & MEM_EVENT_FLAG_VCPU_PAUSED )
+@@ -85,7 +85,7 @@ int mem_access_memop(unsigned long cmd,
+         goto out;
+ 
+     rc = -ENODEV;
+-    if ( unlikely(!d->mem_event->access.ring_page) )
++    if ( unlikely(!d->mem_event->monitor.ring_page) )
+         goto out;
+ 
+     switch ( mao.op )
+@@ -152,11 +152,11 @@ int mem_access_memop(unsigned long cmd,
+ 
+ int mem_access_send_req(struct domain *d, mem_event_request_t *req)
+ {
+-    int rc = mem_event_claim_slot(d, &d->mem_event->access);
++    int rc = mem_event_claim_slot(d, &d->mem_event->monitor);
+     if ( rc < 0 )
+         return rc;
+ 
+-    mem_event_put_request(d, &d->mem_event->access, req);
++    mem_event_put_request(d, &d->mem_event->monitor, req);
+ 
+     return 0;
+ }
+diff --git a/xen/common/mem_event.c b/xen/common/mem_event.c
+index cf6112e..370ec81 100644
+--- a/xen/common/mem_event.c
++++ b/xen/common/mem_event.c
+@@ -445,7 +445,7 @@ static void mem_paging_notification(struct vcpu *v, unsigned int port)
+ /* Registered with Xen-bound event channel for incoming notifications. */
+ static void mem_access_notification(struct vcpu *v, unsigned int port)
+ {
+-    if ( likely(v->domain->mem_event->access.ring_page != NULL) )
++    if ( likely(v->domain->mem_event->monitor.ring_page != NULL) )
+         mem_access_resume(v->domain);
+ }
+ #endif
+@@ -497,7 +497,8 @@ int do_mem_event_op(int op, uint32_t domain, void *arg)
+ void mem_event_cleanup(struct domain *d)
+ {
+ #ifdef HAS_MEM_PAGING
+-    if ( d->mem_event->paging.ring_page ) {
++    if ( d->mem_event->paging.ring_page )
++    {
+         /* Destroying the wait queue head means waking up all
+          * queued vcpus. This will drain the list, allowing
+          * the disable routine to complete. It will also drop
+@@ -510,13 +511,15 @@ void mem_event_cleanup(struct domain *d)
+     }
+ #endif
+ #ifdef HAS_MEM_ACCESS
+-    if ( d->mem_event->access.ring_page ) {
+-        destroy_waitqueue_head(&d->mem_event->access.wq);
+-        (void)mem_event_disable(d, &d->mem_event->access);
++    if ( d->mem_event->monitor.ring_page )
++    {
++        destroy_waitqueue_head(&d->mem_event->monitor.wq);
++        (void)mem_event_disable(d, &d->mem_event->monitor);
+     }
+ #endif
+ #ifdef HAS_MEM_SHARING
+-    if ( d->mem_event->share.ring_page ) {
++    if ( d->mem_event->share.ring_page )
++    {
+         destroy_waitqueue_head(&d->mem_event->share.wq);
+         (void)mem_event_disable(d, &d->mem_event->share);
+     }
+@@ -565,7 +568,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+ 
+         switch( mec->op )
+         {
+-        case XEN_DOMCTL_MEM_EVENT_OP_PAGING_ENABLE:
++        case XEN_MEM_EVENT_PAGING_ENABLE:
+         {
+             struct p2m_domain *p2m = p2m_get_hostp2m(d);
+ 
+@@ -595,7 +598,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+         }
+         break;
+ 
+-        case XEN_DOMCTL_MEM_EVENT_OP_PAGING_DISABLE:
++        case XEN_MEM_EVENT_PAGING_DISABLE:
+         {
+             if ( med->ring_page )
+                 rc = mem_event_disable(d, med);
+@@ -611,32 +614,32 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+ #endif
+ 
+ #ifdef HAS_MEM_ACCESS
+-    case XEN_DOMCTL_MEM_EVENT_OP_ACCESS:
++    case XEN_DOMCTL_MEM_EVENT_OP_MONITOR:
+     {
+-        struct mem_event_domain *med = &d->mem_event->access;
++        struct mem_event_domain *med = &d->mem_event->monitor;
+         rc = -EINVAL;
+ 
+         switch( mec->op )
+         {
+-        case XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE:
+-        case XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE_INTROSPECTION:
++        case XEN_MEM_EVENT_MONITOR_ENABLE:
++        case XEN_MEM_EVENT_MONITOR_ENABLE_INTROSPECTION:
+         {
+             rc = -ENODEV;
+             if ( !p2m_mem_event_sanity_check(d) )
+                 break;
+ 
+             rc = mem_event_enable(d, mec, med, _VPF_mem_access,
+-                                    HVM_PARAM_ACCESS_RING_PFN,
++                                    HVM_PARAM_MONITOR_RING_PFN,
+                                     mem_access_notification);
+ 
+-            if ( mec->op == XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE_INTROSPECTION
++            if ( mec->op == XEN_MEM_EVENT_MONITOR_ENABLE_INTROSPECTION
+                  && !rc )
+                 p2m_setup_introspection(d);
+ 
+         }
+         break;
+ 
+-        case XEN_DOMCTL_MEM_EVENT_OP_ACCESS_DISABLE:
++        case XEN_MEM_EVENT_MONITOR_DISABLE:
+         {
+             if ( med->ring_page )
+             {
+@@ -662,7 +665,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+ 
+         switch( mec->op )
+         {
+-        case XEN_DOMCTL_MEM_EVENT_OP_SHARING_ENABLE:
++        case XEN_MEM_EVENT_SHARING_ENABLE:
+         {
+             rc = -EOPNOTSUPP;
+             /* pvh fixme: p2m_is_foreign types need addressing */
+@@ -680,7 +683,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+         }
+         break;
+ 
+-        case XEN_DOMCTL_MEM_EVENT_OP_SHARING_DISABLE:
++        case XEN_MEM_EVENT_SHARING_DISABLE:
+         {
+             if ( med->ring_page )
+                 rc = mem_event_disable(d, med);
+diff --git a/xen/include/asm-arm/p2m.h b/xen/include/asm-arm/p2m.h
+index da36504..299ee06 100644
+--- a/xen/include/asm-arm/p2m.h
++++ b/xen/include/asm-arm/p2m.h
+@@ -71,11 +71,11 @@ typedef enum {
+ } p2m_type_t;
+ 
+ static inline
+-void p2m_mem_event_emulate_check(struct vcpu *v,
+-                                 const mem_event_response_t *rsp)
++void p2m_mem_access_emulate_check(struct vcpu *v,
++                                  const mem_event_response_t *rsp)
+ {
+     /* Not supported on ARM. */
+-};
++}
+ 
+ static inline
+ void p2m_setup_introspection(struct domain *d)
+diff --git a/xen/include/asm-x86/hvm/emulate.h b/xen/include/asm-x86/hvm/emulate.h
+index 5411302..b3971c8 100644
+--- a/xen/include/asm-x86/hvm/emulate.h
++++ b/xen/include/asm-x86/hvm/emulate.h
+@@ -38,7 +38,7 @@ int hvm_emulate_one(
+     struct hvm_emulate_ctxt *hvmemul_ctxt);
+ int hvm_emulate_one_no_write(
+     struct hvm_emulate_ctxt *hvmemul_ctxt);
+-void hvm_mem_event_emulate_one(bool_t nowrite,
++void hvm_mem_access_emulate_one(bool_t nowrite,
+     unsigned int trapnr,
+     unsigned int errcode);
+ void hvm_emulate_prepare(
+diff --git a/xen/include/asm-x86/p2m.h b/xen/include/asm-x86/p2m.h
+index 5f7fe71..93c65f4 100644
+--- a/xen/include/asm-x86/p2m.h
++++ b/xen/include/asm-x86/p2m.h
+@@ -586,8 +586,8 @@ int p2m_get_mem_access(struct domain *d, unsigned long pfn,
+ 
+ /* Check for emulation and mark vcpu for skipping one instruction
+  * upon rescheduling if required. */
+-void p2m_mem_event_emulate_check(struct vcpu *v,
+-                                 const mem_event_response_t *rsp);
++void p2m_mem_access_emulate_check(struct vcpu *v,
++                                  const mem_event_response_t *rsp);
+ 
+ /* Enable arch specific introspection options (such as MSR interception). */
+ void p2m_setup_introspection(struct domain *d);
+diff --git a/xen/include/public/domctl.h b/xen/include/public/domctl.h
+index 116bca9..a159687 100644
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -763,7 +763,7 @@ struct xen_domctl_gdbsx_domstatus {
+  * pager<->hypervisor interface. Use XENMEM_paging_op*
+  * to perform per-page operations.
+  *
+- * The XEN_DOMCTL_MEM_EVENT_OP_PAGING_ENABLE domctl returns several
++ * The XEN_MEM_EVENT_PAGING_ENABLE domctl returns several
+  * non-standard error codes to indicate why paging could not be enabled:
+  * ENODEV - host lacks HAP support (EPT/NPT) or HAP is disabled in guest
+  * EMLINK - guest has iommu passthrough enabled
+@@ -772,33 +772,40 @@ struct xen_domctl_gdbsx_domstatus {
+  */
+ #define XEN_DOMCTL_MEM_EVENT_OP_PAGING            1
+ 
+-#define XEN_DOMCTL_MEM_EVENT_OP_PAGING_ENABLE     0
+-#define XEN_DOMCTL_MEM_EVENT_OP_PAGING_DISABLE    1
++#define XEN_MEM_EVENT_PAGING_ENABLE               0
++#define XEN_MEM_EVENT_PAGING_DISABLE              1
+ 
+ /*
+- * Access permissions.
++ * Monitor helper.
+  *
+  * As with paging, use the domctl for teardown/setup of the
+  * helper<->hypervisor interface.
+  *
+- * There are HVM hypercalls to set the per-page access permissions of every
+- * page in a domain.  When one of these permissions--independent, read, 
+- * write, and execute--is violated, the VCPU is paused and a memory event 
+- * is sent with what happened.  (See public/mem_event.h) .
++ * The monitor interface can be used to register for various VM events. For
++ * example, there are HVM hypercalls to set the per-page access permissions
++ * of every page in a domain.  When one of these permissions--independent,
++ * read, write, and execute--is violated, the VCPU is paused and a memory event
++ * is sent with what happened. The memory event handler can then resume the
++ * VCPU and redo the access with a XENMEM_access_op_resume hypercall.
+  *
+- * The memory event handler can then resume the VCPU and redo the access 
+- * with a XENMEM_access_op_resume hypercall.
++ * See public/mem_event.h for the list of available events that can be
++ * subscribed to via the monitor interface.
+  *
+- * The XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE domctl returns several
++ * To enable MOV-TO-MSR interception on x86, it is necessary to enable this
++ * interface with the XEN_MEM_EVENT_MONITOR_ENABLE_INTROSPECTION
++ * operator.
++ *
++ * The XEN_MEM_EVENT_MONITOR_ENABLE* domctls return several
+  * non-standard error codes to indicate why access could not be enabled:
+  * ENODEV - host lacks HAP support (EPT/NPT) or HAP is disabled in guest
+  * EBUSY  - guest has or had access enabled, ring buffer still active
++ *
+  */
+-#define XEN_DOMCTL_MEM_EVENT_OP_ACCESS                        2
++#define XEN_DOMCTL_MEM_EVENT_OP_MONITOR                        2
+ 
+-#define XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE                 0
+-#define XEN_DOMCTL_MEM_EVENT_OP_ACCESS_DISABLE                1
+-#define XEN_DOMCTL_MEM_EVENT_OP_ACCESS_ENABLE_INTROSPECTION   2
++#define XEN_MEM_EVENT_MONITOR_ENABLE                           0
++#define XEN_MEM_EVENT_MONITOR_DISABLE                          1
++#define XEN_MEM_EVENT_MONITOR_ENABLE_INTROSPECTION             2
+ 
+ /*
+  * Sharing ENOMEM helper.
+@@ -815,13 +822,13 @@ struct xen_domctl_gdbsx_domstatus {
+  */
+ #define XEN_DOMCTL_MEM_EVENT_OP_SHARING           3
+ 
+-#define XEN_DOMCTL_MEM_EVENT_OP_SHARING_ENABLE    0
+-#define XEN_DOMCTL_MEM_EVENT_OP_SHARING_DISABLE   1
++#define XEN_MEM_EVENT_SHARING_ENABLE              0
++#define XEN_MEM_EVENT_SHARING_DISABLE             1
+ 
+ /* Use for teardown/setup of helper<->hypervisor interface for paging, 
+  * access and sharing.*/
+ struct xen_domctl_mem_event_op {
+-    uint32_t       op;           /* XEN_DOMCTL_MEM_EVENT_OP_*_* */
++    uint32_t       op;           /* XEN_MEM_EVENT_*_* */
+     uint32_t       mode;         /* XEN_DOMCTL_MEM_EVENT_OP_* */
+ 
+     uint32_t port;              /* OUT: event channel for ring */
+diff --git a/xen/include/xen/sched.h b/xen/include/xen/sched.h
+index 8339793..1a1e0b8 100644
+--- a/xen/include/xen/sched.h
++++ b/xen/include/xen/sched.h
+@@ -293,8 +293,8 @@ struct mem_event_per_domain
+     struct mem_event_domain share;
+     /* Memory paging support */
+     struct mem_event_domain paging;
+-    /* Memory access support */
+-    struct mem_event_domain access;
++    /* VM event monitor support */
++    struct mem_event_domain monitor;
+ };
+ 
+ struct evtchn_port_ops;
+-- 
+2.4.5
+

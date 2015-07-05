@@ -1,0 +1,510 @@
+From f612d208081eeeed6d62bf9625d3989793131a27 Mon Sep 17 00:00:00 2001
+From: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Date: Fri, 5 Jun 2015 12:20:18 +0200
+Subject: [PATCH 15/22] vm_event: clean up control-register-write vm_events and
+ add XCR0 event
+
+As suggested by Andrew Cooper, this patch attempts to remove
+some redundancy and allow for an easier time when adding vm_events
+for new control registers in the future, by having a single
+VM_EVENT_REASON_WRITE_CTRLREG vm_event type, meant to serve CR0,
+CR3, CR4 and (newly introduced) XCR0. The actual control register
+will be deduced by the new .index field in vm_event_write_ctrlreg
+(renamed from vm_event_mov_to_cr).
+
+Signed-off-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: Kevin Tian <kevin.tian@intel.com>
+Acked-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Tim Deegan <tim@xen.org>
+---
+ tools/libxc/include/xenctrl.h   |  9 ++----
+ tools/libxc/xc_monitor.c        | 40 ++++----------------------
+ xen/arch/x86/hvm/event.c        | 55 ++++++++++-------------------------
+ xen/arch/x86/hvm/hvm.c          | 11 ++++---
+ xen/arch/x86/hvm/vmx/vmx.c      |  6 ++--
+ xen/arch/x86/monitor.c          | 63 +++++++++++++++--------------------------
+ xen/include/asm-x86/domain.h    | 12 ++------
+ xen/include/asm-x86/hvm/event.h |  6 ++--
+ xen/include/asm-x86/monitor.h   |  2 ++
+ xen/include/public/domctl.h     | 12 ++++----
+ xen/include/public/vm_event.h   | 29 ++++++++++---------
+ 11 files changed, 87 insertions(+), 158 deletions(-)
+
+diff --git a/tools/libxc/include/xenctrl.h b/tools/libxc/include/xenctrl.h
+index aa3e0a6..05cb6ba 100644
+--- a/tools/libxc/include/xenctrl.h
++++ b/tools/libxc/include/xenctrl.h
+@@ -2364,12 +2364,9 @@ int xc_mem_access_disable_emulate(xc_interface *xch, domid_t domain_id);
+ void *xc_monitor_enable(xc_interface *xch, domid_t domain_id, uint32_t *port);
+ int xc_monitor_disable(xc_interface *xch, domid_t domain_id);
+ int xc_monitor_resume(xc_interface *xch, domid_t domain_id);
+-int xc_monitor_mov_to_cr0(xc_interface *xch, domid_t domain_id, bool enable,
+-                          bool sync, bool onchangeonly);
+-int xc_monitor_mov_to_cr3(xc_interface *xch, domid_t domain_id, bool enable,
+-                          bool sync, bool onchangeonly);
+-int xc_monitor_mov_to_cr4(xc_interface *xch, domid_t domain_id, bool enable,
+-                          bool sync, bool onchangeonly);
++int xc_monitor_write_ctrlreg(xc_interface *xch, domid_t domain_id,
++                             uint16_t index, bool enable, bool sync,
++                             bool onchangeonly);
+ int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, bool enable,
+                           bool extended_capture);
+ int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id, bool enable);
+diff --git a/tools/libxc/xc_monitor.c b/tools/libxc/xc_monitor.c
+index 87ad968..63013de 100644
+--- a/tools/libxc/xc_monitor.c
++++ b/tools/libxc/xc_monitor.c
+@@ -45,8 +45,9 @@ int xc_monitor_resume(xc_interface *xch, domid_t domain_id)
+                                NULL);
+ }
+ 
+-int xc_monitor_mov_to_cr0(xc_interface *xch, domid_t domain_id, bool enable,
+-                          bool sync, bool onchangeonly)
++int xc_monitor_write_ctrlreg(xc_interface *xch, domid_t domain_id,
++                             uint16_t index, bool enable, bool sync,
++                             bool onchangeonly)
+ {
+     DECLARE_DOMCTL;
+ 
+@@ -54,39 +55,8 @@ int xc_monitor_mov_to_cr0(xc_interface *xch, domid_t domain_id, bool enable,
+     domctl.domain = domain_id;
+     domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
+                                     : XEN_DOMCTL_MONITOR_OP_DISABLE;
+-    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR0;
+-    domctl.u.monitor_op.u.mov_to_cr.sync = sync;
+-    domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
+-
+-    return do_domctl(xch, &domctl);
+-}
+-
+-int xc_monitor_mov_to_cr3(xc_interface *xch, domid_t domain_id, bool enable,
+-                          bool sync, bool onchangeonly)
+-{
+-    DECLARE_DOMCTL;
+-
+-    domctl.cmd = XEN_DOMCTL_monitor_op;
+-    domctl.domain = domain_id;
+-    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
+-                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
+-    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR3;
+-    domctl.u.monitor_op.u.mov_to_cr.sync = sync;
+-    domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
+-
+-    return do_domctl(xch, &domctl);
+-}
+-
+-int xc_monitor_mov_to_cr4(xc_interface *xch, domid_t domain_id, bool enable,
+-                          bool sync, bool onchangeonly)
+-{
+-    DECLARE_DOMCTL;
+-
+-    domctl.cmd = XEN_DOMCTL_monitor_op;
+-    domctl.domain = domain_id;
+-    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
+-                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
+-    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR4;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG;
++    domctl.u.monitor_op.u.mov_to_cr.index = index;
+     domctl.u.monitor_op.u.mov_to_cr.sync = sync;
+     domctl.u.monitor_op.u.mov_to_cr.onchangeonly = onchangeonly;
+ 
+diff --git a/xen/arch/x86/hvm/event.c b/xen/arch/x86/hvm/event.c
+index 9d5f9f3..53b9ca4 100644
+--- a/xen/arch/x86/hvm/event.c
++++ b/xen/arch/x86/hvm/event.c
+@@ -21,6 +21,8 @@
+ 
+ #include <xen/vm_event.h>
+ #include <xen/paging.h>
++#include <asm/hvm/event.h>
++#include <asm/monitor.h>
+ #include <public/vm_event.h>
+ 
+ static void hvm_event_fill_regs(vm_event_request_t *req)
+@@ -88,55 +90,28 @@ static int hvm_event_traps(uint8_t sync, vm_event_request_t *req)
+     return 1;
+ }
+ 
+-static inline
+-void hvm_event_cr(uint32_t reason, unsigned long value,
+-                         unsigned long old, bool_t onchangeonly, bool_t sync)
++void hvm_event_cr(unsigned int index, unsigned long value, unsigned long old)
+ {
+-    if ( onchangeonly && value == old )
+-        return;
+-    else
++    struct arch_domain *currad = &current->domain->arch;
++    unsigned int ctrlreg_bitmask = monitor_ctrlreg_bitmask(index);
++
++    if ( (currad->monitor.write_ctrlreg_enabled & ctrlreg_bitmask) &&
++         (!(currad->monitor.write_ctrlreg_onchangeonly & ctrlreg_bitmask) ||
++          value != old) )
+     {
+         vm_event_request_t req = {
+-            .reason = reason,
++            .reason = VM_EVENT_REASON_WRITE_CTRLREG,
+             .vcpu_id = current->vcpu_id,
+-            .u.mov_to_cr.new_value = value,
+-            .u.mov_to_cr.old_value = old
++            .u.write_ctrlreg.index = index,
++            .u.write_ctrlreg.new_value = value,
++            .u.write_ctrlreg.old_value = old
+         };
+ 
+-        hvm_event_traps(sync, &req);
++        hvm_event_traps(currad->monitor.write_ctrlreg_sync & ctrlreg_bitmask,
++                        &req);
+     }
+ }
+ 
+-void hvm_event_cr0(unsigned long value, unsigned long old)
+-{
+-    struct arch_domain *currad = &current->domain->arch;
+-
+-    if ( currad->monitor.mov_to_cr0_enabled )
+-        hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR0, value, old,
+-                     currad->monitor.mov_to_cr0_onchangeonly,
+-                     currad->monitor.mov_to_cr0_sync);
+-}
+-
+-void hvm_event_cr3(unsigned long value, unsigned long old)
+-{
+-    struct arch_domain *currad = &current->domain->arch;
+-
+-    if ( currad->monitor.mov_to_cr3_enabled )
+-        hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR3, value, old,
+-                     currad->monitor.mov_to_cr3_onchangeonly,
+-                     currad->monitor.mov_to_cr3_sync);
+-}
+-
+-void hvm_event_cr4(unsigned long value, unsigned long old)
+-{
+-    struct arch_domain *currad = &current->domain->arch;
+-
+-    if ( currad->monitor.mov_to_cr4_enabled )
+-        hvm_event_cr(VM_EVENT_REASON_MOV_TO_CR4, value, old,
+-                     currad->monitor.mov_to_cr4_onchangeonly,
+-                     currad->monitor.mov_to_cr4_sync);
+-}
+-
+ void hvm_event_msr(unsigned int msr, uint64_t value)
+ {
+     struct vcpu *curr = current;
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index 999943b..62b6bdb 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -2960,11 +2960,14 @@ out:
+ int hvm_handle_xsetbv(u32 index, u64 new_bv)
+ {
+     struct segment_register sreg;
++    struct vcpu *curr = current;
+ 
+-    hvm_get_segment_register(current, x86_seg_ss, &sreg);
++    hvm_get_segment_register(curr, x86_seg_ss, &sreg);
+     if ( sreg.attr.fields.dpl != 0 )
+         goto err;
+ 
++    hvm_event_crX(XCR0, new_bv, curr->arch.xcr0);
++
+     if ( handle_xsetbv(index, new_bv) )
+         goto err;
+ 
+@@ -3269,7 +3272,7 @@ int hvm_set_cr0(unsigned long value)
+         hvm_funcs.handle_cd(v, value);
+ 
+     hvm_update_cr(v, 0, value);
+-    hvm_event_cr0(value, old_value);
++    hvm_event_crX(CR0, value, old_value);
+ 
+     if ( (value ^ old_value) & X86_CR0_PG ) {
+         if ( !nestedhvm_vmswitch_in_progress(v) && nestedhvm_vcpu_in_guestmode(v) )
+@@ -3310,7 +3313,7 @@ int hvm_set_cr3(unsigned long value)
+     old=v->arch.hvm_vcpu.guest_cr[3];
+     v->arch.hvm_vcpu.guest_cr[3] = value;
+     paging_update_cr3(v);
+-    hvm_event_cr3(value, old);
++    hvm_event_crX(CR3, value, old);
+     return X86EMUL_OKAY;
+ 
+  bad_cr3:
+@@ -3351,7 +3354,7 @@ int hvm_set_cr4(unsigned long value)
+     }
+ 
+     hvm_update_cr(v, 4, value);
+-    hvm_event_cr4(value, old_cr);
++    hvm_event_crX(CR4, value, old_cr);
+ 
+     /*
+      * Modifying CR4.{PSE,PAE,PGE,SMEP}, or clearing CR4.PCIDE
+diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
+index 6d710b9..991cbdd 100644
+--- a/xen/arch/x86/hvm/vmx/vmx.c
++++ b/xen/arch/x86/hvm/vmx/vmx.c
+@@ -57,6 +57,7 @@
+ #include <asm/apic.h>
+ #include <asm/hvm/nestedhvm.h>
+ #include <asm/event.h>
++#include <asm/monitor.h>
+ #include <public/arch-x86/cpuid.h>
+ 
+ static bool_t __initdata opt_force_ept;
+@@ -1228,7 +1229,8 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
+                 v->arch.hvm_vmx.exec_control |= cr3_ctls;
+ 
+             /* Trap CR3 updates if CR3 memory events are enabled. */
+-            if ( v->domain->arch.monitor.mov_to_cr3_enabled )
++            if ( v->domain->arch.monitor.write_ctrlreg_enabled &
++                 monitor_ctrlreg_bitmask(VM_EVENT_X86_CR3) )
+                 v->arch.hvm_vmx.exec_control |= CPU_BASED_CR3_LOAD_EXITING;
+ 
+             vmx_update_cpu_exec_control(v);
+@@ -1988,7 +1990,7 @@ static int vmx_cr_access(unsigned long exit_qualification)
+         unsigned long old = curr->arch.hvm_vcpu.guest_cr[0];
+         curr->arch.hvm_vcpu.guest_cr[0] &= ~X86_CR0_TS;
+         vmx_update_guest_cr(curr, 0);
+-        hvm_event_cr0(curr->arch.hvm_vcpu.guest_cr[0], old);
++        hvm_event_crX(CR0, curr->arch.hvm_vcpu.guest_cr[0], old);
+         HVMTRACE_0D(CLTS);
+         break;
+     }
+diff --git a/xen/arch/x86/monitor.c b/xen/arch/x86/monitor.c
+index d7b1c18..896acf7 100644
+--- a/xen/arch/x86/monitor.c
++++ b/xen/arch/x86/monitor.c
+@@ -67,59 +67,42 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
+ 
+     switch ( mop->event )
+     {
+-    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR0:
++    case XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG:
+     {
+-        bool_t status = ad->monitor.mov_to_cr0_enabled;
+-
+-        rc = status_check(mop, status);
+-        if ( rc )
+-            return rc;
+-
+-        ad->monitor.mov_to_cr0_sync = mop->u.mov_to_cr.sync;
+-        ad->monitor.mov_to_cr0_onchangeonly = mop->u.mov_to_cr.onchangeonly;
+-
+-        domain_pause(d);
+-        ad->monitor.mov_to_cr0_enabled = !status;
+-        domain_unpause(d);
+-        break;
+-    }
+-
+-    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR3:
+-    {
+-        bool_t status = ad->monitor.mov_to_cr3_enabled;
++        unsigned int ctrlreg_bitmask =
++            monitor_ctrlreg_bitmask(mop->u.mov_to_cr.index);
++        bool_t status =
++            !!(ad->monitor.write_ctrlreg_enabled & ctrlreg_bitmask);
+         struct vcpu *v;
+ 
+         rc = status_check(mop, status);
+         if ( rc )
+             return rc;
+ 
+-        ad->monitor.mov_to_cr3_sync = mop->u.mov_to_cr.sync;
+-        ad->monitor.mov_to_cr3_onchangeonly = mop->u.mov_to_cr.onchangeonly;
++        if ( mop->u.mov_to_cr.sync )
++            ad->monitor.write_ctrlreg_sync |= ctrlreg_bitmask;
++        else
++            ad->monitor.write_ctrlreg_sync &= ~ctrlreg_bitmask;
+ 
+-        domain_pause(d);
+-        ad->monitor.mov_to_cr3_enabled = !status;
+-        domain_unpause(d);
++        if ( mop->u.mov_to_cr.onchangeonly )
++            ad->monitor.write_ctrlreg_onchangeonly |= ctrlreg_bitmask;
++        else
++            ad->monitor.write_ctrlreg_onchangeonly &= ~ctrlreg_bitmask;
+ 
+-        /* Latches new CR3 mask through CR0 code */
+-        for_each_vcpu ( d, v )
+-            hvm_funcs.update_guest_cr(v, 0);
+-        break;
+-    }
++        domain_pause(d);
+ 
+-    case XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR4:
+-    {
+-        bool_t status = ad->monitor.mov_to_cr4_enabled;
++        if ( !status )
++            ad->monitor.write_ctrlreg_enabled |= ctrlreg_bitmask;
++        else
++            ad->monitor.write_ctrlreg_enabled &= ~ctrlreg_bitmask;
+ 
+-        rc = status_check(mop, status);
+-        if ( rc )
+-            return rc;
++        domain_unpause(d);
+ 
+-        ad->monitor.mov_to_cr4_sync = mop->u.mov_to_cr.sync;
+-        ad->monitor.mov_to_cr4_onchangeonly = mop->u.mov_to_cr.onchangeonly;
++        if ( mop->u.mov_to_cr.index == VM_EVENT_X86_CR3 )
++            /* Latches new CR3 mask through CR0 code */
++            for_each_vcpu ( d, v )
++                hvm_funcs.update_guest_cr(v, 0);
+ 
+-        domain_pause(d);
+-        ad->monitor.mov_to_cr4_enabled = !status;
+-        domain_unpause(d);
+         break;
+     }
+ 
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index 1b93f96..c5e2ea6 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -333,15 +333,9 @@ struct arch_domain
+ 
+     /* Monitor options */
+     struct {
+-        uint16_t mov_to_cr0_enabled          : 1;
+-        uint16_t mov_to_cr0_sync             : 1;
+-        uint16_t mov_to_cr0_onchangeonly     : 1;
+-        uint16_t mov_to_cr3_enabled          : 1;
+-        uint16_t mov_to_cr3_sync             : 1;
+-        uint16_t mov_to_cr3_onchangeonly     : 1;
+-        uint16_t mov_to_cr4_enabled          : 1;
+-        uint16_t mov_to_cr4_sync             : 1;
+-        uint16_t mov_to_cr4_onchangeonly     : 1;
++        uint16_t write_ctrlreg_enabled       : 4;
++        uint16_t write_ctrlreg_sync          : 4;
++        uint16_t write_ctrlreg_onchangeonly  : 4;
+         uint16_t mov_to_msr_enabled          : 1;
+         uint16_t mov_to_msr_extended         : 1;
+         uint16_t singlestep_enabled          : 1;
+diff --git a/xen/include/asm-x86/hvm/event.h b/xen/include/asm-x86/hvm/event.h
+index bb757a1..819ef96 100644
+--- a/xen/include/asm-x86/hvm/event.h
++++ b/xen/include/asm-x86/hvm/event.h
+@@ -19,9 +19,9 @@
+ #define __ASM_X86_HVM_EVENT_H__
+ 
+ /* Called for current VCPU on crX/MSR changes by guest */
+-void hvm_event_cr0(unsigned long value, unsigned long old);
+-void hvm_event_cr3(unsigned long value, unsigned long old);
+-void hvm_event_cr4(unsigned long value, unsigned long old);
++void hvm_event_cr(unsigned int index, unsigned long value, unsigned long old);
++#define hvm_event_crX(what, new, old) \
++    hvm_event_cr(VM_EVENT_X86_##what, new, old)
+ void hvm_event_msr(unsigned int msr, uint64_t value);
+ /* Called for current VCPU: returns -1 if no listener */
+ int hvm_event_int3(unsigned long gla);
+diff --git a/xen/include/asm-x86/monitor.h b/xen/include/asm-x86/monitor.h
+index 21b3e5b..d5815db 100644
+--- a/xen/include/asm-x86/monitor.h
++++ b/xen/include/asm-x86/monitor.h
+@@ -26,6 +26,8 @@
+ struct domain;
+ struct xen_domctl_monitor_op;
+ 
++#define monitor_ctrlreg_bitmask(ctrlreg_index) (1U << (ctrlreg_index))
++
+ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *op);
+ 
+ #endif /* __ASM_X86_MONITOR_H__ */
+diff --git a/xen/include/public/domctl.h b/xen/include/public/domctl.h
+index e63518e..95c7777 100644
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -1014,12 +1014,10 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_psr_cmt_op_t);
+ #define XEN_DOMCTL_MONITOR_OP_ENABLE   0
+ #define XEN_DOMCTL_MONITOR_OP_DISABLE  1
+ 
+-#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR0            0
+-#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR3            1
+-#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_CR4            2
+-#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR            3
+-#define XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP            4
+-#define XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT   5
++#define XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG         0
++#define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR            1
++#define XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP            2
++#define XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT   3
+ 
+ struct xen_domctl_monitor_op {
+     uint32_t op; /* XEN_DOMCTL_MONITOR_OP_* */
+@@ -1030,6 +1028,8 @@ struct xen_domctl_monitor_op {
+      */
+     union {
+         struct {
++            /* Which control register */
++            uint8_t index;
+             /* Pause vCPU until response */
+             uint8_t sync;
+             /* Send event only on a change of value */
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index c7426de..577e971 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -60,22 +60,24 @@
+ #define VM_EVENT_REASON_MEM_SHARING             2
+ /* Memory paging event */
+ #define VM_EVENT_REASON_MEM_PAGING              3
+-/* CR0 was updated */
+-#define VM_EVENT_REASON_MOV_TO_CR0              4
+-/* CR3 was updated */
+-#define VM_EVENT_REASON_MOV_TO_CR3              5
+-/* CR4 was updated */
+-#define VM_EVENT_REASON_MOV_TO_CR4              6
++/* A control register was updated */
++#define VM_EVENT_REASON_WRITE_CTRLREG           4
+ /* An MSR was updated. */
+-#define VM_EVENT_REASON_MOV_TO_MSR              7
++#define VM_EVENT_REASON_MOV_TO_MSR              5
+ /* Debug operation executed (e.g. int3) */
+-#define VM_EVENT_REASON_SOFTWARE_BREAKPOINT     8
++#define VM_EVENT_REASON_SOFTWARE_BREAKPOINT     6
+ /* Single-step (e.g. MTF) */
+-#define VM_EVENT_REASON_SINGLESTEP              9
++#define VM_EVENT_REASON_SINGLESTEP              7
++
++/* Supported values for the vm_event_write_ctrlreg index. */
++#define VM_EVENT_X86_CR0    0
++#define VM_EVENT_X86_CR3    1
++#define VM_EVENT_X86_CR4    2
++#define VM_EVENT_X86_XCR0   3
+ 
+ /*
+  * Using a custom struct (not hvm_hw_cpu) so as to not fill
+- * the mem_event ring buffer too quickly.
++ * the vm_event ring buffer too quickly.
+  */
+ struct vm_event_regs_x86 {
+     uint64_t rax;
+@@ -156,14 +158,15 @@ struct vm_event_mem_access {
+     uint32_t _pad;
+ };
+ 
+-struct vm_event_mov_to_cr {
++struct vm_event_write_ctrlreg {
++    uint32_t index;
++    uint32_t _pad;
+     uint64_t new_value;
+     uint64_t old_value;
+ };
+ 
+ struct vm_event_debug {
+     uint64_t gfn;
+-    uint32_t _pad;
+ };
+ 
+ struct vm_event_mov_to_msr {
+@@ -196,7 +199,7 @@ typedef struct vm_event_st {
+         struct vm_event_paging                mem_paging;
+         struct vm_event_sharing               mem_sharing;
+         struct vm_event_mem_access            mem_access;
+-        struct vm_event_mov_to_cr             mov_to_cr;
++        struct vm_event_write_ctrlreg         write_ctrlreg;
+         struct vm_event_mov_to_msr            mov_to_msr;
+         struct vm_event_debug                 software_breakpoint;
+         struct vm_event_debug                 singlestep;
+-- 
+2.4.5
+

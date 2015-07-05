@@ -1,0 +1,73 @@
+From 4f7bff51a48f0e53e0842a427219e58751923503 Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Date: Thu, 9 Apr 2015 16:32:49 +0200
+Subject: [PATCH 09/22] xen/vm_event: Deprecate VM_EVENT_FLAG_DUMMY flag
+
+There are no use-cases for this flag.
+
+Signed-off-by: Tamas K Lengyel <tamas.lengyel@zentific.com>
+Acked-by: Tim Deegan <tim@xen.org>
+---
+ xen/arch/x86/mm/mem_sharing.c | 3 ---
+ xen/arch/x86/mm/p2m.c         | 3 ---
+ xen/common/mem_access.c       | 3 ---
+ xen/include/public/vm_event.h | 1 -
+ 4 files changed, 10 deletions(-)
+
+diff --git a/xen/arch/x86/mm/mem_sharing.c b/xen/arch/x86/mm/mem_sharing.c
+index 4e5477a..e6572af 100644
+--- a/xen/arch/x86/mm/mem_sharing.c
++++ b/xen/arch/x86/mm/mem_sharing.c
+@@ -606,9 +606,6 @@ int mem_sharing_sharing_resume(struct domain *d)
+             continue;
+         }
+ 
+-        if ( rsp.flags & VM_EVENT_FLAG_DUMMY )
+-            continue;
+-
+         /* Validate the vcpu_id in the response. */
+         if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
+             continue;
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index 0b56d57..9a48b21 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1308,9 +1308,6 @@ void p2m_mem_paging_resume(struct domain *d)
+             continue;
+         }
+ 
+-        if ( rsp.flags & VM_EVENT_FLAG_DUMMY )
+-            continue;
+-
+         /* Validate the vcpu_id in the response. */
+         if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
+             continue;
+diff --git a/xen/common/mem_access.c b/xen/common/mem_access.c
+index f925ac7..7ed8a4e 100644
+--- a/xen/common/mem_access.c
++++ b/xen/common/mem_access.c
+@@ -44,9 +44,6 @@ void mem_access_resume(struct domain *d)
+             continue;
+         }
+ 
+-        if ( rsp.flags & VM_EVENT_FLAG_DUMMY )
+-            continue;
+-
+         /* Validate the vcpu_id in the response. */
+         if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
+             continue;
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index ed9105b..c7426de 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -47,7 +47,6 @@
+ #define VM_EVENT_FLAG_VCPU_PAUSED     (1 << 0)
+ /* Flags to aid debugging mem_event */
+ #define VM_EVENT_FLAG_FOREIGN         (1 << 1)
+-#define VM_EVENT_FLAG_DUMMY           (1 << 2)
+ 
+ /*
+  * Reasons for the vm event request
+-- 
+2.4.5
+

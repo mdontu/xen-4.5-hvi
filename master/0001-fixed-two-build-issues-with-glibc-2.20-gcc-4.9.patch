@@ -1,0 +1,39 @@
+From 443c761289face51fec20e91756fae59fc65b99f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+Date: Wed, 24 Jun 2015 20:35:51 +0300
+Subject: [PATCH 01/22] fixed two build issues with glibc 2.20 / gcc 4.9
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+-Werror in CFLAGS triggers a build failure because glibc 2.20 has code
+in place to emit a warning when the return code of write() is not used
+(see xg_err())
+
+_BSD_SOURCE use is deprecated by gcc 4.9. Modern code should use
+_DEFAULT_SOURCE
+
+Signed-off-by: Mihai Donțu <mdontu@bitdefender.com>
+---
+ tools/xenguest/Makefile | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/tools/xenguest/Makefile b/tools/xenguest/Makefile
+index f859cfd..658f922 100644
+--- a/tools/xenguest/Makefile
++++ b/tools/xenguest/Makefile
+@@ -1,10 +1,9 @@
+ XEN_ROOT=$(CURDIR)/../..
+ include $(XEN_ROOT)/tools/Rules.mk
+ 
+-CFLAGS += -Werror
+ CFLAGS += -I.
+ CFLAGS += $(CFLAGS_libxenctrl) $(CFLAGS_libguest) $(CFLAGS_libxenstore)
+-CFLAGS += -D_GNU_SOURCE -D_BSD_SOURCE
++CFLAGS += -D_GNU_SOURCE -D_DEFAULT_SOURCE
+ 
+ PROGRAMS := xenguest
+ 
+-- 
+2.4.5
+

@@ -1,0 +1,223 @@
+From b064354e63cee84c3cbf7a8d7aa74e6650fa9835 Mon Sep 17 00:00:00 2001
+From: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Date: Mon, 15 Jun 2015 12:03:26 +0300
+Subject: [PATCH 18/22] xen/vm_event: Support for guest-requested events
+
+Added support for a new class of vm_events: VM_EVENT_REASON_REQUEST,
+sent via HVMOP_request_vm_event. The guest can request that a
+generic vm_event (containing only the vm_event-filled guest registers
+as information) be sent to userspace by setting up the correct
+registers and doing a VMCALL. For example, for a 64-bit guest, this
+means: EAX = 34 (hvmop), EBX = 24 (HVMOP_request_vm_event).
+
+Signed-off-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+---
+ tools/libxc/include/xenctrl.h   |  2 ++
+ tools/libxc/xc_monitor.c        | 15 +++++++++++++++
+ xen/arch/x86/hvm/event.c        | 14 ++++++++++++++
+ xen/arch/x86/hvm/hvm.c          |  4 ++++
+ xen/arch/x86/monitor.c          | 16 ++++++++++++++++
+ xen/include/asm-x86/domain.h    | 16 +++++++++-------
+ xen/include/asm-x86/hvm/event.h |  1 +
+ xen/include/public/domctl.h     |  6 ++++++
+ xen/include/public/hvm/hvm_op.h |  4 ++++
+ xen/include/public/vm_event.h   |  2 ++
+ 10 files changed, 73 insertions(+), 7 deletions(-)
+
+diff --git a/tools/libxc/include/xenctrl.h b/tools/libxc/include/xenctrl.h
+index 05cb6ba..5635d8b 100644
+--- a/tools/libxc/include/xenctrl.h
++++ b/tools/libxc/include/xenctrl.h
+@@ -2372,6 +2372,8 @@ int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, bool enable,
+ int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id, bool enable);
+ int xc_monitor_software_breakpoint(xc_interface *xch, domid_t domain_id,
+                                    bool enable);
++int xc_monitor_requested(xc_interface *xch, domid_t domain_id, bool enable,
++                         bool sync);
+ 
+ /***
+  * Memory sharing operations.
+diff --git a/tools/libxc/xc_monitor.c b/tools/libxc/xc_monitor.c
+index 63013de..545d427 100644
+--- a/tools/libxc/xc_monitor.c
++++ b/tools/libxc/xc_monitor.c
+@@ -105,3 +105,18 @@ int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id,
+ 
+     return do_domctl(xch, &domctl);
+ }
++
++int xc_monitor_requested(xc_interface *xch, domid_t domain_id, bool enable,
++                         bool sync)
++{
++    DECLARE_DOMCTL;
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = enable ? XEN_DOMCTL_MONITOR_OP_ENABLE
++                                    : XEN_DOMCTL_MONITOR_OP_DISABLE;
++    domctl.u.monitor_op.event = XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST;
++    domctl.u.monitor_op.u.request.sync = sync;
++
++    return do_domctl(xch, &domctl);
++}
+diff --git a/xen/arch/x86/hvm/event.c b/xen/arch/x86/hvm/event.c
+index 5341937..5df0e31 100644
+--- a/xen/arch/x86/hvm/event.c
++++ b/xen/arch/x86/hvm/event.c
+@@ -126,6 +126,20 @@ void hvm_event_msr(unsigned int msr, uint64_t value)
+         hvm_event_traps(1, &req);
+ }
+ 
++void hvm_event_requested(void)
++{
++    struct vcpu *curr = current;
++    struct arch_domain *currad = &curr->domain->arch;
++
++    vm_event_request_t req = {
++        .reason = VM_EVENT_REASON_GUEST_REQUEST,
++        .vcpu_id = curr->vcpu_id,
++    };
++
++    if ( currad->monitor.request_enabled )
++        hvm_event_traps(currad->monitor.request_sync, &req);
++}
++
+ int hvm_event_int3(unsigned long gla)
+ {
+     int rc = 0;
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index 62b6bdb..5fcfd72 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -6287,6 +6287,10 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
+         break;
+     }
+ 
++    case HVMOP_request_vm_event:
++        hvm_event_requested();
++        break;
++
+     default:
+     {
+         gdprintk(XENLOG_DEBUG, "Bad HVM op %ld.\n", op);
+diff --git a/xen/arch/x86/monitor.c b/xen/arch/x86/monitor.c
+index 896acf7..11c66bd 100644
+--- a/xen/arch/x86/monitor.c
++++ b/xen/arch/x86/monitor.c
+@@ -161,6 +161,22 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
+         break;
+     }
+ 
++    case XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST:
++    {
++        bool_t status = ad->monitor.request_enabled;
++
++        rc = status_check(mop, status);
++        if ( rc )
++            return rc;
++
++        ad->monitor.request_sync = mop->u.request.sync;
++
++        domain_pause(d);
++        ad->monitor.request_enabled = !status;
++        domain_unpause(d);
++        break;
++    }
++
+     default:
+         return -EOPNOTSUPP;
+ 
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index 52009ba..eb0eb68 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -334,13 +334,15 @@ struct arch_domain
+ 
+     /* Monitor options */
+     struct {
+-        uint16_t write_ctrlreg_enabled       : 4;
+-        uint16_t write_ctrlreg_sync          : 4;
+-        uint16_t write_ctrlreg_onchangeonly  : 4;
+-        uint16_t mov_to_msr_enabled          : 1;
+-        uint16_t mov_to_msr_extended         : 1;
+-        uint16_t singlestep_enabled          : 1;
+-        uint16_t software_breakpoint_enabled : 1;
++        uint32_t write_ctrlreg_enabled       : 4;
++        uint32_t write_ctrlreg_sync          : 4;
++        uint32_t write_ctrlreg_onchangeonly  : 4;
++        uint32_t mov_to_msr_enabled          : 1;
++        uint32_t mov_to_msr_extended         : 1;
++        uint32_t singlestep_enabled          : 1;
++        uint32_t software_breakpoint_enabled : 1;
++        uint32_t request_enabled             : 1;
++        uint32_t request_sync                : 1;
+     } monitor;
+ 
+     /* Mem_access emulation control */
+diff --git a/xen/include/asm-x86/hvm/event.h b/xen/include/asm-x86/hvm/event.h
+index 819ef96..8d93f6a 100644
+--- a/xen/include/asm-x86/hvm/event.h
++++ b/xen/include/asm-x86/hvm/event.h
+@@ -26,6 +26,7 @@ void hvm_event_msr(unsigned int msr, uint64_t value);
+ /* Called for current VCPU: returns -1 if no listener */
+ int hvm_event_int3(unsigned long gla);
+ int hvm_event_single_step(unsigned long gla);
++void hvm_event_requested(void);
+ 
+ #endif /* __ASM_X86_HVM_EVENT_H__ */
+ 
+diff --git a/xen/include/public/domctl.h b/xen/include/public/domctl.h
+index 95c7777..01a195e 100644
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -1018,6 +1018,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_psr_cmt_op_t);
+ #define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR            1
+ #define XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP            2
+ #define XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT   3
++#define XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST         4
+ 
+ struct xen_domctl_monitor_op {
+     uint32_t op; /* XEN_DOMCTL_MONITOR_OP_* */
+@@ -1040,6 +1041,11 @@ struct xen_domctl_monitor_op {
+             /* Enable the capture of an extended set of MSRs */
+             uint8_t extended_capture;
+         } mov_to_msr;
++
++        struct {
++            /* Pause vCPU until response */
++            uint8_t sync;
++        } request;
+     } u;
+ };
+ typedef struct xen_domctl__op xen_domctl_monitor_op_t;
+diff --git a/xen/include/public/hvm/hvm_op.h b/xen/include/public/hvm/hvm_op.h
+index 2bd5ba1..d8b02c8 100644
+--- a/xen/include/public/hvm/hvm_op.h
++++ b/xen/include/public/hvm/hvm_op.h
+@@ -388,6 +388,10 @@ DEFINE_XEN_GUEST_HANDLE(xen_hvm_evtchn_upcall_vector_t);
+ 
+ #endif /* defined(__i386__) || defined(__x86_64__) */
+ 
++#if defined(__XEN__) || defined(__XEN_TOOLS__)
++#define HVMOP_request_vm_event 24
++#endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
++
+ /* Legacy NOP: Hint from PV drivers for process destruction. */
+ #define HVMOP_process_dying        0x102
+ 
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index 3223bb4..8c39549 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -68,6 +68,8 @@
+ #define VM_EVENT_REASON_SOFTWARE_BREAKPOINT     6
+ /* Single-step (e.g. MTF) */
+ #define VM_EVENT_REASON_SINGLESTEP              7
++/* An event has been requested via HVMOP_request_vm_event. */
++#define VM_EVENT_REASON_GUEST_REQUEST           8
+ 
+ /* Supported values for the vm_event_write_ctrlreg index. */
+ #define VM_EVENT_X86_CR0    0
+-- 
+2.4.5
+

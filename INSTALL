@@ -1,0 +1,12 @@
+These patches apply on top of XenServer 7.0 sources:
+
+  https://github.com/xenserver/xen-4.5
+  https://github.com/xenserver/xen-4.5.pg
+
+Please see the xen source documentation on how to build it and apply
+patches on top of the source tree.
+
+Quick HOWTO:
+  1. clone the xen-4.5 repository to /some/path/xen-4.5/
+  2. clone hvi-4.5 patch queue repository to /some/path/xen-4.5/.git/patches/
+  3. cd /some/path/xen-4.5 and then do a `guilt push -a` to apply the patches
