@@ -1,7 +1,7 @@
-From 82e4a0345b32cb344c036128c3c0f8d799185b64 Mon Sep 17 00:00:00 2001
+From 446512d33fe10f680c5ea7f8c5c4d0a586b3551b Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 9 Apr 2015 16:32:53 +0200
-Subject: [PATCH 13/22] xen/vm_event: Add RESUME option to vm_event_op domctl
+Subject: [PATCH 13/26] xen/vm_event: Add RESUME option to vm_event_op domctl
 
 Thus far mem_access and mem_sharing memops had been able to signal
 to Xen to start pulling responses off the corresponding rings. In this patch
@@ -315,10 +315,10 @@ index aa00513..4ed55a6 100644
      case XENMEM_access_op_set_access:
          rc = -EINVAL;
 diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
-index 2211e90..629bb54 100644
+index 331654d..c7ad476 100644
 --- a/xen/common/vm_event.c
 +++ b/xen/common/vm_event.c
-@@ -577,7 +577,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -576,7 +576,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
  
          switch( mec->op )
          {
@@ -327,7 +327,7 @@ index 2211e90..629bb54 100644
          {
              struct p2m_domain *p2m = p2m_get_hostp2m(d);
  
-@@ -607,11 +607,18 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -606,11 +606,18 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
          }
          break;
  
@@ -347,7 +347,7 @@ index 2211e90..629bb54 100644
          default:
              rc = -ENOSYS;
              break;
-@@ -627,17 +634,24 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -626,17 +633,24 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
  
          switch( mec->op )
          {
@@ -374,7 +374,7 @@ index 2211e90..629bb54 100644
          default:
              rc = -ENOSYS;
              break;
-@@ -653,7 +667,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -652,7 +666,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
  
          switch( mec->op )
          {
@@ -383,7 +383,7 @@ index 2211e90..629bb54 100644
              rc = -EOPNOTSUPP;
              /* pvh fixme: p2m_is_foreign types need addressing */
              if ( is_pvh_vcpu(current) || is_pvh_domain(hardware_domain) )
-@@ -669,11 +683,18 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -668,11 +682,18 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
                                      mem_sharing_notification);
              break;
  
@@ -518,5 +518,5 @@ index 515cf29..bbd69b8 100644
  #define XENMEM_SHARING_OP_S_HANDLE_INVALID  (-10)
  #define XENMEM_SHARING_OP_C_HANDLE_INVALID  (-9)
 -- 
-2.4.5
+2.5.0
 

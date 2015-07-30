@@ -1,7 +1,7 @@
-From b810dc7c7e954ee553804573227e4f630b4a41a3 Mon Sep 17 00:00:00 2001
+From ff12d7f54dc0718ddb1ebcbb77b7608f968f0561 Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 26 Mar 2015 22:06:57 +0100
-Subject: [PATCH 06/22] tools/tests: Clean-up tools/tests/xen-access
+Subject: [PATCH 06/26] tools/tests: Clean-up tools/tests/xen-access
 
 The spin-lock implementation in the xen-access test program is implemented
 in a fashion that is actually incomplete. The x86 assembly that guarantees that
@@ -258,5 +258,5 @@ index 9e913e4..d667bf5 100644
  
          if ( shutting_down )
 -- 
-2.4.5
+2.5.0
 

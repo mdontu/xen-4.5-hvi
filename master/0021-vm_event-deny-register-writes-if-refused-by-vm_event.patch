@@ -1,49 +1,263 @@
-From 1dc7adf0c83f412cdd4cc0118880e6f46f829c9f Mon Sep 17 00:00:00 2001
-From: Razvan Cojocaru <rcojocaru@bitdefender.com>
-Date: Mon, 15 Jun 2015 12:03:27 +0300
-Subject: [PATCH 19/22] xen/vm_event: Deny register writes if refused by
- vm_event reply
+From 438cb19031f782272e8e4938fcab5caf2c3f67e8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+Date: Mon, 27 Jul 2015 21:50:10 +0300
+Subject: [PATCH 21/26] vm_event: deny register writes if refused by vm_event
+ reply
 
-Deny register writes if a vm_client subscribed to mov_to_msr events
-forbids them. Currently supported for MSR, CR0, CR3 and CR4 events.
+Deny register writes if a vm_client subscribed to mov_to_msr or
+control register write events forbids them. Currently supported for
+MSR, CR0, CR3 and CR4 events.
 
 Signed-off-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
 ---
- xen/arch/x86/domain.c             |   2 +
+ config/Docs.mk                    |   4 +-
+ config/Paths.mk                   |  10 ++--
+ config/Stubdom.mk                 |  45 ---------------
+ config/Tools.mk                   |  24 ++++----
+ tools/config.h                    |  10 ++--
+ xen/arch/x86/domain.c             |   3 +
  xen/arch/x86/hvm/emulate.c        |   8 +--
  xen/arch/x86/hvm/event.c          |   5 +-
- xen/arch/x86/hvm/hvm.c            | 120 +++++++++++++++++++++++++++++++++-----
+ xen/arch/x86/hvm/hvm.c            | 118 +++++++++++++++++++++++++++++++++-----
  xen/arch/x86/hvm/svm/nestedsvm.c  |  14 ++---
  xen/arch/x86/hvm/svm/svm.c        |   2 +-
  xen/arch/x86/hvm/viridian.c       |   2 +-
- xen/arch/x86/hvm/vmx/vmx.c        |   6 +-
+ xen/arch/x86/hvm/vmx/vmx.c        |  15 +++--
  xen/arch/x86/hvm/vmx/vvmx.c       |  18 +++---
- xen/arch/x86/mm/p2m.c             |  29 +++++++++
- xen/common/vm_event.c             |   6 ++
+ xen/arch/x86/vm_event.c           |  43 ++++++++++++++
+ xen/common/vm_event.c             |   4 ++
+ xen/include/asm-arm/vm_event.h    |   7 +++
  xen/include/asm-x86/domain.h      |  18 +++++-
- xen/include/asm-x86/hvm/event.h   |   3 +-
+ xen/include/asm-x86/hvm/event.h   |   9 ++-
  xen/include/asm-x86/hvm/support.h |   9 +--
+ xen/include/asm-x86/vm_event.h    |   3 +
  xen/include/public/vm_event.h     |   5 ++
- 15 files changed, 202 insertions(+), 45 deletions(-)
+ 22 files changed, 260 insertions(+), 116 deletions(-)
+ delete mode 100644 config/Stubdom.mk
 
+diff --git a/config/Docs.mk b/config/Docs.mk
+index b1a32cb..1cb59e5 100644
+--- a/config/Docs.mk
++++ b/config/Docs.mk
+@@ -1,10 +1,10 @@
+ -include $(XEN_ROOT)/config/Paths.mk
+ 
+ # Tools
+-FIG2DEV             := 
++FIG2DEV             := /usr/bin/fig2dev
+ POD2MAN             := /usr/bin/pod2man
+ POD2HTML            := /usr/bin/pod2html
+ POD2TEXT            := /usr/bin/pod2text
+-MARKDOWN            := 
++MARKDOWN            := /usr/bin/markdown_py
+ PANDOC              := 
+ PERL                := /usr/bin/perl
+diff --git a/config/Paths.mk b/config/Paths.mk
+index dc97bc1..6d55fdf 100644
+--- a/config/Paths.mk
++++ b/config/Paths.mk
+@@ -16,8 +16,8 @@ PACKAGE_TARNAME          := xen
+ prefix                   := /usr
+ bindir                   := /usr/bin
+ sbindir                  := /usr/sbin
+-libdir                   := /usr/lib64
+-libexecdir               := /usr/libexec
++libdir                   := /usr/lib
++libexecdir               := /usr/lib
+ datarootdir              := ${prefix}/share
+ mandir                   := ${datarootdir}/man
+ docdir                   := ${datarootdir}/doc/${PACKAGE_TARNAME}
+@@ -34,7 +34,7 @@ PREFIX                   := $(prefix)
+ SBINDIR                  := $(sbindir)
+ BINDIR                   := $(bindir)
+ LIBEXEC                  := $(libexecdir)/$(PACKAGE_TARNAME)
+-LIBEXEC_BIN              := /usr/libexec/xen/bin
++LIBEXEC_BIN              := /usr/lib/xen/bin
+ LIBEXEC_LIB              := $(LIBEXEC)/lib
+ LIBEXEC_INC              := $(LIBEXEC)/include
+ 
+@@ -51,8 +51,8 @@ XEN_LOG_DIR              := /var/log/xen
+ XEN_LIB_STORED           := /var/lib/xenstored
+ 
+ CONFIG_DIR               := /etc
+-INITD_DIR                := /etc/rc.d/init.d
+-CONFIG_LEAF_DIR          := sysconfig
++INITD_DIR                := /etc/init.d
++CONFIG_LEAF_DIR          := default
+ BASH_COMPLETION_DIR      := $(CONFIG_DIR)/bash_completion.d
+ XEN_LOCK_DIR             := /var/lock
+ XEN_PAGING_DIR           := /var/lib/xen/xenpaging
+diff --git a/config/Stubdom.mk b/config/Stubdom.mk
+deleted file mode 100644
+index a8bb1d3..0000000
+--- a/config/Stubdom.mk
++++ /dev/null
+@@ -1,45 +0,0 @@
+-# Prefix and install folder
+-prefix              := /usr/local
+-PREFIX              := $(prefix)
+-exec_prefix         := ${prefix}
+-libdir              := ${exec_prefix}/lib
+-LIBDIR              := $(libdir)
+-
+-# Path Programs
+-CMAKE               := /usr/bin/cmake
+-FETCHER             := /usr/bin/wget -c -O
+-
+-# A debug build of stubdom? //FIXME: Someone make this do something
+-debug               := y
+-vtpm = y
+-
+-STUBDOM_TARGETS     :=  ioemu grub xenstore vtpm vtpmmgr
+-STUBDOM_BUILD       :=  ioemu-stubdom pv-grub xenstore-stubdom vtpm-stubdom vtpmmgr-stubdom
+-STUBDOM_INSTALL     :=  install-ioemu install-grub install-xenstore install-vtpm install-vtpmmgr
+-
+-ZLIB_VERSION        := 1.2.3
+-ZLIB_URL            := $(XEN_EXTFILES_URL)
+-
+-LIBPCI_VERSION      := 2.2.9
+-LIBPCI_URL          := $(XEN_EXTFILES_URL)
+-
+-NEWLIB_VERSION      := 1.16.0
+-NEWLIB_URL          := $(XEN_EXTFILES_URL)
+-
+-LWIP_VERSION        := 1.3.0
+-LWIP_URL            := $(XEN_EXTFILES_URL)
+-
+-GRUB_VERSION        := 0.97
+-GRUB_URL            := $(XEN_EXTFILES_URL)
+-
+-OCAML_VERSION       := 3.11.0
+-OCAML_URL           := http://caml.inria.fr/pub/distrib/ocaml-3.11
+-
+-GMP_VERSION         := 4.3.2
+-GMP_URL             := $(XEN_EXTFILES_URL)
+-
+-POLARSSL_VERSION    := 1.1.4
+-POLARSSL_URL        := $(XEN_EXTFILES_URL)
+-
+-TPMEMU_VERSION      := 0.7.4
+-TPMEMU_URL          := $(XEN_EXTFILES_URL)
+diff --git a/config/Tools.mk b/config/Tools.mk
+index 2c38670..9fc9332 100644
+--- a/config/Tools.mk
++++ b/config/Tools.mk
+@@ -38,8 +38,8 @@ PTHREAD_LIBS        :=
+ 
+ PTYFUNCS_LIBS       := -lutil
+ 
+-LIBNL3_LIBS         := 
+-LIBNL3_CFLAGS       := 
++LIBNL3_LIBS         := -lnl-route-3 -lnl-3 
++LIBNL3_CFLAGS       := -I/usr/include/libnl3 
+ XEN_TOOLS_RPATH     := n
+ 
+ # Download GIT repositories via HTTP or GIT's own protocol?
+@@ -50,28 +50,28 @@ GIT_HTTP            := n
+ 
+ # Optional components
+ XENSTAT_XENTOP      := y
+-OCAML_TOOLS         := y
++OCAML_TOOLS         := n
+ FLASK_POLICY        := n
+ CONFIG_OVMF         := n
+ CONFIG_ROMBIOS      := y
+ CONFIG_SEABIOS      := n
+ CONFIG_QEMU_TRAD    := y
+-CONFIG_QEMU_XEN     := n
++CONFIG_QEMU_XEN     := y
+ CONFIG_BLKTAP1      := n
+-CONFIG_BLKTAP2      := n
++CONFIG_BLKTAP2      := y
+ CONFIG_QEMUU_EXTRA_ARGS:= 
+-CONFIG_REMUS_NETBUF := n
++CONFIG_REMUS_NETBUF := y
+ 
+-CONFIG_SYSTEMD      := y
+-SYSTEMD_CFLAGS      :=  
+-SYSTEMD_LIBS        := -lsystemd-daemon  
+-XEN_SYSTEMD_DIR     := $(prefix)/lib/systemd/system/
+-XEN_SYSTEMD_MODULES_LOAD := $(prefix)/lib/modules-load.d/
++CONFIG_SYSTEMD      := n
++SYSTEMD_CFLAGS      := 
++SYSTEMD_LIBS        := 
++XEN_SYSTEMD_DIR     := 
++XEN_SYSTEMD_MODULES_LOAD := 
+ 
+ LINUX_BACKEND_MODULES := xen-evtchn xen-gntdev xen-gntalloc xen-blkback xen-netback xen-pciback evtchn gntdev netbk blkbk xen-scsibk usbbk pciback xen-acpi-processor blktap2 blktap
+ 
+ #System options
+-ZLIB                :=  -DHAVE_BZLIB -lbz2 -DHAVE_LZMA -llzma
++ZLIB                :=  -DHAVE_BZLIB -lbz2 -DHAVE_LZMA -llzma -DHAVE_LZO1X -llzo2
+ CONFIG_LIBICONV     := n
+ CONFIG_GCRYPT       := y
+ EXTFS_LIBS          := -lext2fs
+diff --git a/tools/config.h b/tools/config.h
+index 0ebc9df..356593e 100644
+--- a/tools/config.h
++++ b/tools/config.h
+@@ -2,13 +2,13 @@
+ /* config.h.in.  Generated from configure.ac by autoheader.  */
+ 
+ /* Blktap2 enabled */
+-/* #undef HAVE_BLKTAP2 */
++#define HAVE_BLKTAP2 1
+ 
+ /* Define to 1 if you have the <inttypes.h> header file. */
+ #define HAVE_INTTYPES_H 1
+ 
+ /* Define to 1 if you have the `aio' library (-laio). */
+-/* #undef HAVE_LIBAIO */
++#define HAVE_LIBAIO 1
+ 
+ /* Define to 1 if you have the `crypto' library (-lcrypto). */
+ #define HAVE_LIBCRYPTO 1
+@@ -44,7 +44,7 @@
+ #define HAVE_STRING_H 1
+ 
+ /* Systemd available and enabled */
+-#define HAVE_SYSTEMD 1
++/* #undef HAVE_SYSTEMD */
+ 
+ /* Define to 1 if you have the <sys/eventfd.h> header file. */
+ #define HAVE_SYS_EVENTFD_H 1
+@@ -62,7 +62,7 @@
+ #define HAVE_UTMP_H 1
+ 
+ /* Define to 1 if you have the <valgrind/memcheck.h> header file. */
+-/* #undef HAVE_VALGRIND_MEMCHECK_H */
++#define HAVE_VALGRIND_MEMCHECK_H 1
+ 
+ /* Define to 1 if you have the <yajl/yajl_version.h> header file. */
+ #define HAVE_YAJL_YAJL_VERSION_H 1
+@@ -95,7 +95,7 @@
+ #define PACKAGE_VERSION "4.5"
+ 
+ /* Qemu Xen path */
+-#define QEMU_XEN_PATH "/usr/lib64/xen/bin/qemu-system-i386"
++/* #undef QEMU_XEN_PATH */
+ 
+ /* Define to 1 if you have the ANSI C header files. */
+ #define STDC_HEADERS 1
 diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
-index 16b95dd..3c987d3 100644
+index 4908094..60dfe6d 100644
 --- a/xen/arch/x86/domain.c
 +++ b/xen/arch/x86/domain.c
-@@ -665,6 +665,8 @@ void arch_domain_destroy(struct domain *d)
-     cleanup_domain_irq_mapping(d);
+@@ -648,6 +648,9 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags)
  
-     psr_free_rmid(d);
-+
+ void arch_domain_destroy(struct domain *d)
+ {
 +    xfree(d->arch.event_write_data);
- }
++    d->arch.event_write_data = NULL;
++
+     if ( has_hvm_container_domain(d) )
+         hvm_domain_destroy(d);
  
- void arch_domain_shutdown(struct domain *d)
 diff --git a/xen/arch/x86/hvm/emulate.c b/xen/arch/x86/hvm/emulate.c
-index 84dd5a6..ece9e9e 100644
+index aecf85e..4954a92 100644
 --- a/xen/arch/x86/hvm/emulate.c
 +++ b/xen/arch/x86/hvm/emulate.c
-@@ -1339,14 +1339,14 @@ static int hvmemul_write_cr(
+@@ -1265,14 +1265,14 @@ static int hvmemul_write_cr(
      switch ( reg )
      {
      case 0:
@@ -61,7 +275,7 @@ index 84dd5a6..ece9e9e 100644
      default:
          break;
      }
-@@ -1367,7 +1367,7 @@ static int hvmemul_write_msr(
+@@ -1293,7 +1293,7 @@ static int hvmemul_write_msr(
      uint64_t val,
      struct x86_emulate_ctxt *ctxt)
  {
@@ -71,7 +285,7 @@ index 84dd5a6..ece9e9e 100644
  
  static int hvmemul_wbinvd(
 diff --git a/xen/arch/x86/hvm/event.c b/xen/arch/x86/hvm/event.c
-index 5df0e31..9ac8583 100644
+index 5341937..7b92e17 100644
 --- a/xen/arch/x86/hvm/event.c
 +++ b/xen/arch/x86/hvm/event.c
 @@ -90,7 +90,7 @@ static int hvm_event_traps(uint8_t sync, vm_event_request_t *req)
@@ -95,7 +309,7 @@ index 5df0e31..9ac8583 100644
  
  void hvm_event_msr(unsigned int msr, uint64_t value)
 diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index 5fcfd72..dfe4a7b 100644
+index 0f01cb5..ff6dd08 100644
 --- a/xen/arch/x86/hvm/hvm.c
 +++ b/xen/arch/x86/hvm/hvm.c
 @@ -52,6 +52,7 @@
@@ -106,13 +320,11 @@ index 5fcfd72..dfe4a7b 100644
  #include <asm/hvm/hvm.h>
  #include <asm/hvm/vpt.h>
  #include <asm/hvm/support.h>
-@@ -455,6 +456,37 @@ void hvm_do_resume(struct vcpu *v)
+@@ -455,6 +456,35 @@ void hvm_do_resume(struct vcpu *v)
          }
      }
  
-+    ASSERT(v == current);
-+
-+    if ( d->arch.event_write_data )
++    if ( unlikely(d->arch.event_write_data) )
 +    {
 +        struct monitor_write_data *w = &d->arch.event_write_data[v->vcpu_id];
 +
@@ -128,23 +340,23 @@ index 5fcfd72..dfe4a7b 100644
 +            w->do_write.cr0 = 0;
 +        }
 +
-+        if ( w->do_write.cr3 )
-+        {
-+            hvm_set_cr3(w->cr3, 0);
-+            w->do_write.cr3 = 0;
-+        }
-+
 +        if ( w->do_write.cr4 )
 +        {
 +            hvm_set_cr4(w->cr4, 0);
 +            w->do_write.cr4 = 0;
++        }
++
++        if ( w->do_write.cr3 )
++        {
++            hvm_set_cr3(w->cr3, 0);
++            w->do_write.cr3 = 0;
 +        }
 +    }
 +
      /* Inject pending hw/sw trap */
      if ( v->arch.hvm_vcpu.inject_trap.vector != -1 ) 
      {
-@@ -3068,13 +3100,13 @@ int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
+@@ -3070,13 +3100,13 @@ int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
      switch ( cr )
      {
      case 0:
@@ -161,12 +373,12 @@ index 5fcfd72..dfe4a7b 100644
  
      case 8:
          vlapic_set_reg(vcpu_vlapic(curr), APIC_TASKPRI, ((val & 0x0f) << 4));
-@@ -3171,12 +3203,13 @@ static void hvm_update_cr(struct vcpu *v, unsigned int cr, unsigned long value)
+@@ -3173,12 +3203,13 @@ static void hvm_update_cr(struct vcpu *v, unsigned int cr, unsigned long value)
      hvm_update_guest_cr(v, cr);
  }
  
 -int hvm_set_cr0(unsigned long value)
-+int hvm_set_cr0(unsigned long value, bool_t event_only)
++int hvm_set_cr0(unsigned long value, bool_t may_defer)
  {
      struct vcpu *v = current;
      struct domain *d = v->domain;
@@ -176,13 +388,13 @@ index 5fcfd72..dfe4a7b 100644
  
      HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR0 value = %lx", value);
  
-@@ -3206,6 +3239,22 @@ int hvm_set_cr0(unsigned long value)
+@@ -3208,6 +3239,22 @@ int hvm_set_cr0(unsigned long value)
          goto gpf;
      }
  
-+    if ( event_only && unlikely(currad->monitor.write_ctrlreg_enabled &
-+                                monitor_ctrlreg_bitmask(VM_EVENT_X86_CR0)) &&
-+                                value != old_value )
++    if ( may_defer && unlikely(currad->monitor.write_ctrlreg_enabled &
++                               monitor_ctrlreg_bitmask(VM_EVENT_X86_CR0)) &&
++         value != old_value )
 +    {
 +        ASSERT(currad->event_write_data != NULL);
 +
@@ -199,7 +411,7 @@ index 5fcfd72..dfe4a7b 100644
      if ( (value & X86_CR0_PG) && !(old_value & X86_CR0_PG) )
      {
          if ( v->arch.hvm_vcpu.guest_efer & EFER_LME )
-@@ -3272,7 +3321,6 @@ int hvm_set_cr0(unsigned long value)
+@@ -3274,7 +3321,6 @@ int hvm_set_cr0(unsigned long value)
          hvm_funcs.handle_cd(v, value);
  
      hvm_update_cr(v, 0, value);
@@ -207,12 +419,12 @@ index 5fcfd72..dfe4a7b 100644
  
      if ( (value ^ old_value) & X86_CR0_PG ) {
          if ( !nestedhvm_vmswitch_in_progress(v) && nestedhvm_vcpu_in_guestmode(v) )
-@@ -3288,11 +3336,28 @@ int hvm_set_cr0(unsigned long value)
+@@ -3290,11 +3336,28 @@ int hvm_set_cr0(unsigned long value)
      return X86EMUL_EXCEPTION;
  }
  
 -int hvm_set_cr3(unsigned long value)
-+int hvm_set_cr3(unsigned long value, bool_t event_only)
++int hvm_set_cr3(unsigned long value, bool_t may_defer)
  {
      struct vcpu *v = current;
      struct page_info *page;
@@ -220,9 +432,9 @@ index 5fcfd72..dfe4a7b 100644
 +    unsigned long old = v->arch.hvm_vcpu.guest_cr[3];
 +    struct arch_domain *currad = &v->domain->arch;
 +
-+    if ( event_only && unlikely(currad->monitor.write_ctrlreg_enabled &
-+                                monitor_ctrlreg_bitmask(VM_EVENT_X86_CR3)) &&
-+                                value != old )
++    if ( may_defer && unlikely(currad->monitor.write_ctrlreg_enabled &
++                               monitor_ctrlreg_bitmask(VM_EVENT_X86_CR3)) &&
++         value != old )
 +    {
 +        ASSERT(currad->event_write_data != NULL);
 +
@@ -238,7 +450,7 @@ index 5fcfd72..dfe4a7b 100644
  
      if ( hvm_paging_enabled(v) && !paging_mode_hap(v->domain) &&
           (value != v->arch.hvm_vcpu.guest_cr[3]) )
-@@ -3310,10 +3375,8 @@ int hvm_set_cr3(unsigned long value)
+@@ -3312,10 +3375,8 @@ int hvm_set_cr3(unsigned long value)
          HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR3 value = %lx", value);
      }
  
@@ -249,12 +461,12 @@ index 5fcfd72..dfe4a7b 100644
      return X86EMUL_OKAY;
  
   bad_cr3:
-@@ -3322,10 +3385,11 @@ int hvm_set_cr3(unsigned long value)
+@@ -3324,10 +3385,11 @@ int hvm_set_cr3(unsigned long value)
      return X86EMUL_UNHANDLEABLE;
  }
  
 -int hvm_set_cr4(unsigned long value)
-+int hvm_set_cr4(unsigned long value, bool_t event_only)
++int hvm_set_cr4(unsigned long value, bool_t may_defer)
  {
      struct vcpu *v = current;
      unsigned long old_cr;
@@ -262,13 +474,13 @@ index 5fcfd72..dfe4a7b 100644
  
      if ( value & hvm_cr4_guest_reserved_bits(v, 0) )
      {
-@@ -3353,8 +3417,23 @@ int hvm_set_cr4(unsigned long value)
+@@ -3355,8 +3417,23 @@ int hvm_set_cr4(unsigned long value)
          goto gpf;
      }
  
-+    if ( event_only && unlikely(currad->monitor.write_ctrlreg_enabled &
-+                                monitor_ctrlreg_bitmask(VM_EVENT_X86_CR4)) &&
-+                                value != old_cr )
++    if ( may_defer && unlikely(currad->monitor.write_ctrlreg_enabled &
++                               monitor_ctrlreg_bitmask(VM_EVENT_X86_CR4)) &&
++         value != old_cr )
 +    {
 +        ASSERT(currad->event_write_data != NULL);
 +
@@ -287,7 +499,7 @@ index 5fcfd72..dfe4a7b 100644
  
      /*
       * Modifying CR4.{PSE,PAE,PGE,SMEP}, or clearing CR4.PCIDE
-@@ -3818,7 +3897,7 @@ void hvm_task_switch(
+@@ -3820,7 +3897,7 @@ void hvm_task_switch(
          goto out;
  
  
@@ -296,13 +508,13 @@ index 5fcfd72..dfe4a7b 100644
          goto out;
  
      regs->eip    = tss.eip;
-@@ -4510,12 +4589,14 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
+@@ -4512,12 +4589,14 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
      goto out;
  }
  
 -int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
 +int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
-+                            bool_t event_only)
++                            bool_t may_defer)
  {
      struct vcpu *v = current;
      bool_t mtrr;
@@ -312,12 +524,12 @@ index 5fcfd72..dfe4a7b 100644
  
      HVMTRACE_3D(MSR_WRITE, msr,
                 (uint32_t)msr_content, (uint32_t)(msr_content >> 32));
-@@ -4523,7 +4604,18 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
+@@ -4525,7 +4604,18 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
      hvm_cpuid(1, NULL, NULL, NULL, &edx);
      mtrr = !!(edx & cpufeat_mask(X86_FEATURE_MTRR));
  
 -    hvm_event_msr(msr, msr_content);
-+    if ( event_only && unlikely(currad->monitor.mov_to_msr_enabled) )
++    if ( may_defer && unlikely(currad->monitor.mov_to_msr_enabled) )
 +    {
 +        ASSERT(currad->event_write_data != NULL);
 +
@@ -426,21 +638,29 @@ index 4ef21b6..38094bb 100644
          break;
      case HvFlushVirtualAddressList:
 diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
-index 991cbdd..dc7a3f1 100644
+index 1035306..59acdf5 100644
 --- a/xen/arch/x86/hvm/vmx/vmx.c
 +++ b/xen/arch/x86/hvm/vmx/vmx.c
-@@ -1988,9 +1988,9 @@ static int vmx_cr_access(unsigned long exit_qualification)
+@@ -1994,9 +1994,16 @@ static int vmx_cr_access(unsigned long exit_qualification)
      }
      case VMX_CONTROL_REG_ACCESS_TYPE_CLTS: {
          unsigned long old = curr->arch.hvm_vcpu.guest_cr[0];
-+        hvm_event_crX(CR0, curr->arch.hvm_vcpu.guest_cr[0], old);
-         curr->arch.hvm_vcpu.guest_cr[0] &= ~X86_CR0_TS;
+-        curr->arch.hvm_vcpu.guest_cr[0] &= ~X86_CR0_TS;
++        unsigned long value = old & ~X86_CR0_TS;
++
++        /*
++         * Special case unlikely to be interesting to a
++         * VM_EVENT_FLAG_DENY-capable application, so the hvm_event_crX()
++         * return value is ignored for now.
++         */
++        hvm_event_crX(CR0, value, old);
++        curr->arch.hvm_vcpu.guest_cr[0] = value;
          vmx_update_guest_cr(curr, 0);
 -        hvm_event_crX(CR0, curr->arch.hvm_vcpu.guest_cr[0], old);
          HVMTRACE_0D(CLTS);
          break;
      }
-@@ -1999,7 +1999,7 @@ static int vmx_cr_access(unsigned long exit_qualification)
+@@ -2005,7 +2012,7 @@ static int vmx_cr_access(unsigned long exit_qualification)
          /* LMSW can: (1) set bits 0-3; (2) clear bits 1-3. */
          value = (value & ~0xe) | ((exit_qualification >> 16) & 0xf);
          HVMTRACE_LONG_1D(LMSW, value);
@@ -449,7 +669,7 @@ index 991cbdd..dc7a3f1 100644
      }
      default:
          BUG();
-@@ -3013,7 +3013,7 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
+@@ -3019,7 +3026,7 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
      {
          uint64_t msr_content;
          msr_content = ((uint64_t)regs->edx << 32) | (uint32_t)regs->eax;
@@ -459,7 +679,7 @@ index 991cbdd..dc7a3f1 100644
          break;
      }
 diff --git a/xen/arch/x86/hvm/vmx/vvmx.c b/xen/arch/x86/hvm/vmx/vvmx.c
-index 9ccc03f..663e873 100644
+index 9ccc03f..76f2e89 100644
 --- a/xen/arch/x86/hvm/vmx/vvmx.c
 +++ b/xen/arch/x86/hvm/vmx/vvmx.c
 @@ -1048,15 +1048,16 @@ static void load_shadow_guest_state(struct vcpu *v)
@@ -479,7 +699,7 @@ index 9ccc03f..663e873 100644
      if ( control & VM_ENTRY_LOAD_PERF_GLOBAL_CTRL )
 -        hvm_msr_write_intercept(MSR_CORE_PERF_GLOBAL_CTRL, __get_vvmcs(vvmcs, GUEST_PERF_GLOBAL_CTRL));
 +        hvm_msr_write_intercept(MSR_CORE_PERF_GLOBAL_CTRL,
-+                                __get_vvmcs(vvmcs, GUEST_PERF_GLOBAL_CTRL), 1);
++                                __get_vvmcs(vvmcs, GUEST_PERF_GLOBAL_CTRL), 0);
  
      hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, 0);
  
@@ -504,20 +724,53 @@ index 9ccc03f..663e873 100644
  
      hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, 0);
  
-diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index 7bb6d11..91cd532 100644
---- a/xen/arch/x86/mm/p2m.c
-+++ b/xen/arch/x86/mm/p2m.c
-@@ -1377,6 +1377,35 @@ static void p2m_vm_event_fill_regs(vm_event_request_t *req)
- void p2m_mem_access_emulate_check(struct vcpu *v,
-                                   const vm_event_response_t *rsp)
+diff --git a/xen/arch/x86/vm_event.c b/xen/arch/x86/vm_event.c
+index ec856fb..939b067 100644
+--- a/xen/arch/x86/vm_event.c
++++ b/xen/arch/x86/vm_event.c
+@@ -22,12 +22,20 @@
+ 
+ #include <xen/sched.h>
+ #include <asm/hvm/hvm.h>
++#include <asm/vm_event.h>
+ 
+ /* Implicitly serialized by the domctl lock. */
+ int vm_event_init_domain(struct domain *d)
  {
-+    ASSERT(v->domain->arch.event_write_data != NULL);
+     struct vcpu *v;
+ 
++    if ( !d->arch.event_write_data )
++        d->arch.event_write_data =
++            xmalloc_bytes(sizeof(struct monitor_write_data) * d->max_vcpus);
 +
-+    if ( rsp->flags & MEM_ACCESS_DENY )
++    if ( !d->arch.event_write_data )
++        return -ENOMEM;
++
+     for_each_vcpu ( d, v )
+     {
+         if ( v->arch.vm_event.emul_read_data )
+@@ -51,6 +59,9 @@ void vm_event_cleanup_domain(struct domain *d)
+ {
+     struct vcpu *v;
+ 
++    xfree(d->arch.event_write_data);
++    d->arch.event_write_data = NULL;
++
+     for_each_vcpu ( d, v )
+     {
+         xfree(v->arch.vm_event.emul_read_data);
+@@ -66,6 +77,38 @@ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
+     hvm_toggle_singlestep(v);
+ }
+ 
++void vm_event_register_write_resume(struct vcpu *v, vm_event_response_t *rsp)
++{
++    if ( rsp->flags & VM_EVENT_FLAG_DENY )
 +    {
 +        struct monitor_write_data *w =
 +            &v->domain->arch.event_write_data[v->vcpu_id];
++
++        ASSERT(v->domain->arch.event_write_data != NULL);
 +
 +        switch ( rsp->reason )
 +        {
@@ -540,51 +793,66 @@ index 7bb6d11..91cd532 100644
 +            break;
 +        }
 +    }
++}
 +
-     /* Mark vcpu for skipping one instruction upon rescheduling. */
-     if ( rsp->flags & MEM_ACCESS_EMULATE )
-     {
+ /*
+  * Local variables:
+  * mode: C
 diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
-index b3f6a91..6793a17 100644
+index d9b8bfb..4d7cd01 100644
 --- a/xen/common/vm_event.c
 +++ b/xen/common/vm_event.c
-@@ -79,6 +79,10 @@ static int vm_event_enable(
-         }
-     }
- 
-+    if ( !d->arch.event_write_data )
-+        d->arch.event_write_data = xzalloc_array(struct monitor_write_data,
-+                                                 d->max_vcpus);
-+
-     rc = prepare_ring_for_helper(d, ring_gfn, &med->ring_pg_struct,
-                                     &med->ring_page);
-     if ( rc < 0 )
-@@ -410,6 +414,8 @@ void vm_event_resume(struct domain *d, struct vm_event_domain *ved)
+@@ -392,6 +392,10 @@ void vm_event_resume(struct domain *d, struct vm_event_domain *ved)
+          */
+         switch ( rsp.reason )
+         {
++        case VM_EVENT_REASON_MOV_TO_MSR:
++        case VM_EVENT_REASON_WRITE_CTRLREG:
++            vm_event_register_write_resume(v, &rsp);
++            break;
  
  #ifdef HAS_MEM_ACCESS
          case VM_EVENT_REASON_MEM_ACCESS:
-+        case VM_EVENT_REASON_MOV_TO_MSR:
-+        case VM_EVENT_REASON_WRITE_CTRLREG:
-             mem_access_resume(v, &rsp);
-             break;
- #endif
+diff --git a/xen/include/asm-arm/vm_event.h b/xen/include/asm-arm/vm_event.h
+index 20469a8..0833a65 100644
+--- a/xen/include/asm-arm/vm_event.h
++++ b/xen/include/asm-arm/vm_event.h
+@@ -21,6 +21,7 @@
+ #define __ASM_ARM_VM_EVENT_H__
+ 
+ #include <xen/sched.h>
++#include <xen/vm_event.h>
+ 
+ static inline
+ int vm_event_init_domain(struct domain *d)
+@@ -41,4 +42,10 @@ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
+     /* Not supported on ARM. */
+ }
+ 
++static inline
++void vm_event_register_write_resume(struct vcpu *v, vm_event_response_t *rsp)
++{
++    /* Not supported on ARM. */
++}
++
+ #endif /* __ASM_ARM_VM_EVENT_H__ */
 diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
-index eb0eb68..26b3a85 100644
+index c5a8704..7193af7 100644
 --- a/xen/include/asm-x86/domain.h
 +++ b/xen/include/asm-x86/domain.h
-@@ -245,6 +245,21 @@ struct pv_domain
+@@ -244,6 +244,21 @@ struct pv_domain
      struct mapcache_domain mapcache;
  };
  
 +struct monitor_write_data {
 +    struct {
-+        uint8_t msr : 1;
-+        uint8_t cr0 : 1;
-+        uint8_t cr3 : 1;
-+        uint8_t cr4 : 1;
++        unsigned int msr : 1;
++        unsigned int cr0 : 1;
++        unsigned int cr3 : 1;
++        unsigned int cr4 : 1;
 +    } do_write;
 +
-+    uint64_t msr;
++    uint32_t msr;
 +    uint64_t value;
 +    uint64_t cr0;
 +    uint64_t cr3;
@@ -594,7 +862,7 @@ index eb0eb68..26b3a85 100644
  struct arch_domain
  {
      struct page_info *perdomain_l3_pg;
-@@ -347,6 +362,8 @@ struct arch_domain
+@@ -344,6 +359,8 @@ struct arch_domain
  
      /* Mem_access emulation control */
      bool_t mem_access_emulate_enabled;
@@ -603,7 +871,7 @@ index eb0eb68..26b3a85 100644
  } __cacheline_aligned;
  
  #define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
-@@ -503,7 +520,6 @@ struct arch_vcpu
+@@ -500,7 +517,6 @@ struct arch_vcpu
          unsigned long eip;
          struct vm_event_emul_read_data *emul_read_data;
      } vm_event;
@@ -612,21 +880,27 @@ index eb0eb68..26b3a85 100644
  
  smap_check_policy_t smap_policy_change(struct vcpu *v,
 diff --git a/xen/include/asm-x86/hvm/event.h b/xen/include/asm-x86/hvm/event.h
-index 8d93f6a..d9b3581 100644
+index 819ef96..5643529 100644
 --- a/xen/include/asm-x86/hvm/event.h
 +++ b/xen/include/asm-x86/hvm/event.h
-@@ -19,7 +19,8 @@
+@@ -18,8 +18,13 @@
+ #ifndef __ASM_X86_HVM_EVENT_H__
  #define __ASM_X86_HVM_EVENT_H__
  
- /* Called for current VCPU on crX/MSR changes by guest */
+-/* Called for current VCPU on crX/MSR changes by guest */
 -void hvm_event_cr(unsigned int index, unsigned long value, unsigned long old);
++/*
++ * Called for current VCPU on crX/MSR changes by guest.
++ * The event might not fire if the client has subscribed to it in onchangeonly
++ * mode, hence the bool_t return type for control register write events.
++ */
 +bool_t hvm_event_cr(unsigned int index, unsigned long value,
 +                    unsigned long old);
  #define hvm_event_crX(what, new, old) \
      hvm_event_cr(VM_EVENT_X86_##what, new, old)
  void hvm_event_msr(unsigned int msr, uint64_t value);
 diff --git a/xen/include/asm-x86/hvm/support.h b/xen/include/asm-x86/hvm/support.h
-index 05ef5c5..9c06fd3 100644
+index 05ef5c5..95d3bb2 100644
 --- a/xen/include/asm-x86/hvm/support.h
 +++ b/xen/include/asm-x86/hvm/support.h
 @@ -124,11 +124,12 @@ void hvm_shadow_handle_cd(struct vcpu *v, unsigned long value);
@@ -636,32 +910,51 @@ index 05ef5c5..9c06fd3 100644
 -int hvm_set_cr0(unsigned long value);
 -int hvm_set_cr3(unsigned long value);
 -int hvm_set_cr4(unsigned long value);
-+int hvm_set_cr0(unsigned long value, bool_t event_only);
-+int hvm_set_cr3(unsigned long value, bool_t event_only);
-+int hvm_set_cr4(unsigned long value, bool_t event_only);
++int hvm_set_cr0(unsigned long value, bool_t may_defer);
++int hvm_set_cr3(unsigned long value, bool_t may_defer);
++int hvm_set_cr4(unsigned long value, bool_t may_defer);
  int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content);
 -int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content);
 +int hvm_msr_write_intercept(
-+    unsigned int msr, uint64_t msr_content, bool_t event_only);
++    unsigned int msr, uint64_t msr_content, bool_t may_defer);
  int hvm_mov_to_cr(unsigned int cr, unsigned int gpr);
  int hvm_mov_from_cr(unsigned int cr, unsigned int gpr);
  
+diff --git a/xen/include/asm-x86/vm_event.h b/xen/include/asm-x86/vm_event.h
+index 3881783..2bcfe26 100644
+--- a/xen/include/asm-x86/vm_event.h
++++ b/xen/include/asm-x86/vm_event.h
+@@ -21,6 +21,7 @@
+ #define __ASM_X86_VM_EVENT_H__
+ 
+ #include <xen/sched.h>
++#include <xen/vm_event.h>
+ 
+ int vm_event_init_domain(struct domain *d);
+ 
+@@ -28,4 +29,6 @@ void vm_event_cleanup_domain(struct domain *d);
+ 
+ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v);
+ 
++void vm_event_register_write_resume(struct vcpu *v, vm_event_response_t *rsp);
++
+ #endif /* __ASM_X86_VM_EVENT_H__ */
 diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
-index 8c39549..e96491d 100644
+index 4d89c38..3c280ae 100644
 --- a/xen/include/public/vm_event.h
 +++ b/xen/include/public/vm_event.h
-@@ -158,6 +158,11 @@ struct vm_event_regs_x86 {
-  * MEM_ACCESS_EMULATE_NOWRITE.
+@@ -74,6 +74,11 @@
+  * VM_EVENT_FLAG_SET_EMUL_READ_DATA are set, only the latter will be honored).
   */
- #define MEM_ACCESS_SET_EMUL_READ_DATA   (1 << 8)
+ #define VM_EVENT_FLAG_SET_EMUL_READ_DATA (1 << 5)
 + /*
 +  * Deny completion of the operation that triggered the event.
-+  * Currently only useful for MSR write events.
++  * Currently only useful for MSR, CR0, CR3 and CR4 write events.
 +  */
-+#define MEM_ACCESS_DENY                 (1 << 9)
++#define VM_EVENT_FLAG_DENY               (1 << 6)
  
- struct vm_event_mem_access {
-     uint64_t gfn;
+ /*
+  * Reasons for the vm event request
 -- 
-2.4.5
+2.5.0
 

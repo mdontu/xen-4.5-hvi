@@ -8,5 +8,6 @@ patches on top of the source tree.
 
 Quick HOWTO:
   1. clone the xen-4.5 repository to /some/path/xen-4.5/
-  2. clone hvi-4.5 patch queue repository to /some/path/xen-4.5/.git/patches/
-  3. cd /some/path/xen-4.5 and then do a `guilt push -a` to apply the patches
+  2. apply the specific XenServer 7.0 (see xen-4.5.pg/INSTALL)
+  3. clone xen-4.5-hvi patch queue repository to /some/path/xen-4.5/.git/patches/
+  4. cd /some/path/xen-4.5 and then do a `guilt push -a` to apply the patches

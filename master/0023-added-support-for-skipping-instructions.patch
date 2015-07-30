@@ -1,7 +1,7 @@
-From c59fb0dd0c6cb24734812b00a14e4d565203cab0 Mon Sep 17 00:00:00 2001
+From c3e4b9a42a94bbfd9230171b0d068b0b27756d27 Mon Sep 17 00:00:00 2001
 From: Mihai Dontu <mdontu@bitdefender.com>
 Date: Mon, 29 Jun 2015 14:49:20 +0300
-Subject: [PATCH 20/22] added support for skipping instructions
+Subject: [PATCH 23/26] added support for skipping instructions
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -16,37 +16,39 @@ Based on Razvan Cojocaru's patch:
 
 Signed-off-by: Mihai Donțu <mdontu@bitdefender.com>
 ---
- xen/arch/x86/mm/p2m.c         | 20 ++++++++++++--------
- xen/include/public/vm_event.h |  4 ++++
- 2 files changed, 16 insertions(+), 8 deletions(-)
+ xen/arch/x86/mm/p2m.c         | 21 ++++++++++++---------
+ xen/include/public/vm_event.h |  5 +++++
+ 2 files changed, 17 insertions(+), 9 deletions(-)
 
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index 91cd532..bd7c82c 100644
+index 46e3ed1..87b71a0 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
-@@ -1459,6 +1459,8 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
-         if ( rsp->flags & MEM_ACCESS_SET_EMUL_READ_DATA &&
+@@ -1430,6 +1430,8 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
+         if ( (rsp->flags & VM_EVENT_FLAG_SET_EMUL_READ_DATA) &&
               v->arch.vm_event.emul_read_data )
              *v->arch.vm_event.emul_read_data = rsp->data.emul_read_data;
-+        else if ( rsp->flags & MEM_ACCESS_SKIP_INSTRUCTION )
++        else if ( rsp->flags & VM_EVENT_FLAG_SKIP_INSTRUCTION )
 +            v->arch.vm_event.eip = rsp->data.regs.x86.rsp;
      }
  }
  
-@@ -1545,15 +1547,17 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+@@ -1516,17 +1518,18 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
  
      if ( v->arch.vm_event.emulate_flags )
      {
 -        enum emul_kind kind = EMUL_KIND_NORMAL;
 -
--        if ( v->arch.vm_event.emulate_flags & MEM_ACCESS_SET_EMUL_READ_DATA )
+-        if ( v->arch.vm_event.emulate_flags &
+-             VM_EVENT_FLAG_SET_EMUL_READ_DATA )
 -            kind = EMUL_KIND_SET_CONTEXT;
-+        if ( v->arch.vm_event.emulate_flags & MEM_ACCESS_SKIP_INSTRUCTION )
++        if ( v->arch.vm_event.emulate_flags & VM_EVENT_FLAG_SKIP_INSTRUCTION )
 +            guest_cpu_user_regs()->eip = v->arch.vm_event.eip;
-+        else if ( v->arch.vm_event.emulate_flags & MEM_ACCESS_SET_EMUL_READ_DATA )
++        else if ( v->arch.vm_event.emulate_flags & VM_EVENT_FLAG_SET_EMUL_READ_DATA )
 +            hvm_mem_access_emulate_one(EMUL_KIND_SET_CONTEXT, TRAP_invalid_op,
 +                                       HVM_DELIVER_NO_ERROR_CODE);
-         else if ( v->arch.vm_event.emulate_flags & MEM_ACCESS_EMULATE_NOWRITE )
+         else if ( v->arch.vm_event.emulate_flags &
+                   VM_EVENT_FLAG_EMULATE_NOWRITE )
 -            kind = EMUL_KIND_NOWRITE;
 -
 -        hvm_mem_access_emulate_one(kind, TRAP_invalid_op,
@@ -60,20 +62,21 @@ index 91cd532..bd7c82c 100644
          v->arch.vm_event.emulate_flags = 0;
          return 1;
 diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
-index e96491d..20ba2db 100644
+index fbc76b2..4091b4e 100644
 --- a/xen/include/public/vm_event.h
 +++ b/xen/include/public/vm_event.h
-@@ -163,6 +163,10 @@ struct vm_event_regs_x86 {
-   * Currently only useful for MSR write events.
-   */
- #define MEM_ACCESS_DENY                 (1 << 9)
-+/*
+@@ -81,6 +81,11 @@
+ #define VM_EVENT_FLAG_DENY               (1 << 6)
+ 
+ /*
 + * Skip the current instruction, avoiding any potential read/fetch side-effects
 + */
-+#define MEM_ACCESS_SKIP_INSTRUCTION     (1 << 10)
++#define VM_EVENT_FLAG_SKIP_INSTRUCTION   (1 << 7)
++
++/*
+  * Reasons for the vm event request
+  */
  
- struct vm_event_mem_access {
-     uint64_t gfn;
 -- 
-2.4.5
+2.5.0
 

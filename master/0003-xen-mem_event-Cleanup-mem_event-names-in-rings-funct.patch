@@ -1,7 +1,7 @@
-From 85361ee3a1cb60a84980320262c702e4be45dccc Mon Sep 17 00:00:00 2001
+From 9964a4ce8c2bc670198d10ee99730b8f81f068c0 Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 26 Mar 2015 22:06:54 +0100
-Subject: [PATCH 03/22] xen/mem_event: Cleanup mem_event names in rings,
+Subject: [PATCH 03/26] xen/mem_event: Cleanup mem_event names in rings,
  functions and domctls
 
 The name of one of the mem_event rings still implies it is used only
@@ -247,10 +247,10 @@ index 14c1847..f2e72dc 100644
  {
      struct hvm_emulate_ctxt ctx = {{ 0 }};
 diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index f973939..6f4abcd 100644
+index 9162828..0a54b23 100644
 --- a/xen/arch/x86/hvm/hvm.c
 +++ b/xen/arch/x86/hvm/hvm.c
-@@ -6398,7 +6398,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+@@ -6400,7 +6400,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
      if ( !(parameters & HVMPME_MODE_MASK) )
          return 0;
  
@@ -259,7 +259,7 @@ index f973939..6f4abcd 100644
      if ( rc == -ENOSYS )
      {
          /* If there was no ring to handle the event, then
-@@ -6415,7 +6415,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+@@ -6417,7 +6417,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
      }
  
      hvm_mem_event_fill_regs(req);
@@ -269,7 +269,7 @@ index f973939..6f4abcd 100644
      return 1;
  }
 diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
-index f0b5142..34de069 100644
+index 75e546b..b68802e 100644
 --- a/xen/arch/x86/hvm/vmx/vmcs.c
 +++ b/xen/arch/x86/hvm/vmx/vmcs.c
 @@ -715,7 +715,7 @@ void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
@@ -282,7 +282,7 @@ index f0b5142..34de069 100644
          unsigned int i;
  
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index 0937994..4d6d5bd 100644
+index 3ea2f4a..5ca7549 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -1395,7 +1395,7 @@ static void p2m_mem_event_fill_regs(mem_event_request_t *req)
@@ -362,10 +362,10 @@ index 9c5b7a6..19be7d7 100644
      return 0;
  }
 diff --git a/xen/common/mem_event.c b/xen/common/mem_event.c
-index cf6112e..370ec81 100644
+index 8ab06ce..b96d9fb 100644
 --- a/xen/common/mem_event.c
 +++ b/xen/common/mem_event.c
-@@ -445,7 +445,7 @@ static void mem_paging_notification(struct vcpu *v, unsigned int port)
+@@ -444,7 +444,7 @@ static void mem_paging_notification(struct vcpu *v, unsigned int port)
  /* Registered with Xen-bound event channel for incoming notifications. */
  static void mem_access_notification(struct vcpu *v, unsigned int port)
  {
@@ -374,7 +374,7 @@ index cf6112e..370ec81 100644
          mem_access_resume(v->domain);
  }
  #endif
-@@ -497,7 +497,8 @@ int do_mem_event_op(int op, uint32_t domain, void *arg)
+@@ -496,7 +496,8 @@ int do_mem_event_op(int op, uint32_t domain, void *arg)
  void mem_event_cleanup(struct domain *d)
  {
  #ifdef HAS_MEM_PAGING
@@ -384,7 +384,7 @@ index cf6112e..370ec81 100644
          /* Destroying the wait queue head means waking up all
           * queued vcpus. This will drain the list, allowing
           * the disable routine to complete. It will also drop
-@@ -510,13 +511,15 @@ void mem_event_cleanup(struct domain *d)
+@@ -509,13 +510,15 @@ void mem_event_cleanup(struct domain *d)
      }
  #endif
  #ifdef HAS_MEM_ACCESS
@@ -404,7 +404,7 @@ index cf6112e..370ec81 100644
          destroy_waitqueue_head(&d->mem_event->share.wq);
          (void)mem_event_disable(d, &d->mem_event->share);
      }
-@@ -565,7 +568,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+@@ -564,7 +567,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
  
          switch( mec->op )
          {
@@ -413,7 +413,7 @@ index cf6112e..370ec81 100644
          {
              struct p2m_domain *p2m = p2m_get_hostp2m(d);
  
-@@ -595,7 +598,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+@@ -594,7 +597,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
          }
          break;
  
@@ -422,7 +422,7 @@ index cf6112e..370ec81 100644
          {
              if ( med->ring_page )
                  rc = mem_event_disable(d, med);
-@@ -611,32 +614,32 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+@@ -610,32 +613,32 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
  #endif
  
  #ifdef HAS_MEM_ACCESS
@@ -462,7 +462,7 @@ index cf6112e..370ec81 100644
          {
              if ( med->ring_page )
              {
-@@ -662,7 +665,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+@@ -661,7 +664,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
  
          switch( mec->op )
          {
@@ -471,7 +471,7 @@ index cf6112e..370ec81 100644
          {
              rc = -EOPNOTSUPP;
              /* pvh fixme: p2m_is_foreign types need addressing */
-@@ -680,7 +683,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+@@ -679,7 +682,7 @@ int mem_event_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
          }
          break;
  
@@ -613,10 +613,10 @@ index 116bca9..a159687 100644
  
      uint32_t port;              /* OUT: event channel for ring */
 diff --git a/xen/include/xen/sched.h b/xen/include/xen/sched.h
-index 8339793..1a1e0b8 100644
+index 76fd261..1c97851 100644
 --- a/xen/include/xen/sched.h
 +++ b/xen/include/xen/sched.h
-@@ -293,8 +293,8 @@ struct mem_event_per_domain
+@@ -294,8 +294,8 @@ struct mem_event_per_domain
      struct mem_event_domain share;
      /* Memory paging support */
      struct mem_event_domain paging;
@@ -628,5 +628,5 @@ index 8339793..1a1e0b8 100644
  
  struct evtchn_port_ops;
 -- 
-2.4.5
+2.5.0
 

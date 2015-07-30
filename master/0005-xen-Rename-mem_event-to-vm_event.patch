@@ -1,7 +1,7 @@
-From 5f18c1e2c4301706c2ed4761e80c73b4cbe501d2 Mon Sep 17 00:00:00 2001
-From: Tamas K Lengyel <tamas.lengyel@zentific.com>
-Date: Wed, 24 Jun 2015 21:17:57 +0300
-Subject: [PATCH 05/22] xen: Rename mem_event to vm_event
+From 518c8df4802c849982e8844458fbb51e139f0cee Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+Date: Mon, 27 Jul 2015 19:55:20 +0300
+Subject: [PATCH 05/26] xen: Rename mem_event to vm_event
 
 In this patch we mechanically rename mem_event to vm_event. This patch
 introduces no logic changes to the code. Using the name vm_event better
@@ -10,9 +10,6 @@ events. It can be used for off-loading the decision making logic into helper
 applications when encountering various events during a VM's execution.
 
 Signed-off-by: Tamas K Lengyel <tamas.lengyel@zentific.com>
-Acked-by: Daniel De Graaf <dgdegra@tycho.nsa.gov>
-Acked-by: Jan Beulich <jbeulich@suse.com>
-Acked-by: Wei Liu <wei.liu2@citrix.com>
 ---
  MAINTAINERS                         |   4 +-
  docs/misc/xsm-flask.txt             |   2 +-
@@ -45,8 +42,8 @@ Acked-by: Wei Liu <wei.liu2@citrix.com>
  xen/common/domain.c                 |  12 +-
  xen/common/domctl.c                 |   8 +-
  xen/common/mem_access.c             |  26 +-
- xen/common/mem_event.c              | 747 ------------------------------------
- xen/common/vm_event.c               | 747 ++++++++++++++++++++++++++++++++++++
+ xen/common/mem_event.c              | 746 ------------------------------------
+ xen/common/vm_event.c               | 746 ++++++++++++++++++++++++++++++++++++
  xen/drivers/passthrough/pci.c       |   2 +-
  xen/include/asm-arm/p2m.h           |   4 +-
  xen/include/asm-x86/domain.h        |   4 +-
@@ -64,7 +61,7 @@ Acked-by: Wei Liu <wei.liu2@citrix.com>
  xen/xsm/dummy.c                     |   4 +-
  xen/xsm/flask/hooks.c               |  16 +-
  xen/xsm/flask/policy/access_vectors |   2 +-
- 50 files changed, 1622 insertions(+), 1624 deletions(-)
+ 50 files changed, 1621 insertions(+), 1623 deletions(-)
  delete mode 100644 tools/libxc/xc_mem_event.c
  create mode 100644 tools/libxc/xc_vm_event.c
  delete mode 100644 xen/common/mem_event.c
@@ -1286,7 +1283,7 @@ index 877db2f..25d511d 100644
      /* number of pages for which data structures were allocated */
      int max_pages;
 diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
-index eea9d33..3a00db5 100644
+index d5c5f8f..fea10cb 100644
 --- a/xen/arch/x86/domain.c
 +++ b/xen/arch/x86/domain.c
 @@ -432,7 +432,7 @@ int vcpu_initialise(struct vcpu *v)
@@ -1336,7 +1333,7 @@ index f2e72dc..fa463f1 100644
           * returning makes the current instruction cause a page fault again,
           * consistent with X86EMUL_RETRY.
 diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index 6f4abcd..b683c33 100644
+index 0a54b23..e5879f9 100644
 --- a/xen/arch/x86/hvm/hvm.c
 +++ b/xen/arch/x86/hvm/hvm.c
 @@ -35,7 +35,7 @@
@@ -1357,7 +1354,7 @@ index 6f4abcd..b683c33 100644
  #include <public/arch-x86/cpuid.h>
  #include "../cpu/cpu.h"
  
-@@ -2749,7 +2749,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
+@@ -2751,7 +2751,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
      struct p2m_domain *p2m;
      int rc, fall_through = 0, paged = 0;
      int sharing_enomem = 0;
@@ -1366,7 +1363,7 @@ index 6f4abcd..b683c33 100644
  
      /* On Nested Virtualization, walk the guest page table.
       * If this succeeds, all is fine.
-@@ -2819,7 +2819,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
+@@ -2821,7 +2821,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
      {
          bool_t violation;
  
@@ -1375,7 +1372,7 @@ index 6f4abcd..b683c33 100644
          switch (p2ma)
          {
          case p2m_access_n:
-@@ -6357,7 +6357,7 @@ int hvm_debug_op(struct vcpu *v, int32_t op)
+@@ -6359,7 +6359,7 @@ int hvm_debug_op(struct vcpu *v, int32_t op)
      return rc;
  }
  
@@ -1384,7 +1381,7 @@ index 6f4abcd..b683c33 100644
  {
      const struct cpu_user_regs *regs = guest_cpu_user_regs();
      const struct vcpu *curr = current;
-@@ -6389,7 +6389,7 @@ static void hvm_mem_event_fill_regs(mem_event_request_t *req)
+@@ -6391,7 +6391,7 @@ static void hvm_mem_event_fill_regs(mem_event_request_t *req)
      req->regs.x86.cr4 = curr->arch.hvm_vcpu.guest_cr[4];
  }
  
@@ -1393,7 +1390,7 @@ index 6f4abcd..b683c33 100644
  {
      int rc;
      struct vcpu *v = current;
-@@ -6398,7 +6398,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+@@ -6400,7 +6400,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
      if ( !(parameters & HVMPME_MODE_MASK) )
          return 0;
  
@@ -1402,7 +1399,7 @@ index 6f4abcd..b683c33 100644
      if ( rc == -ENOSYS )
      {
          /* If there was no ring to handle the event, then
-@@ -6410,12 +6410,12 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+@@ -6412,12 +6412,12 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
  
      if ( (parameters & HVMPME_MODE_MASK) == HVMPME_mode_sync )
      {
@@ -1418,7 +1415,7 @@ index 6f4abcd..b683c33 100644
  
      return 1;
  }
-@@ -6423,7 +6423,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
+@@ -6425,7 +6425,7 @@ static int hvm_memory_event_traps(uint64_t parameters, mem_event_request_t *req)
  static void hvm_memory_event_cr(uint32_t reason, unsigned long value,
                                  unsigned long old, uint64_t parameters)
  {
@@ -1427,7 +1424,7 @@ index 6f4abcd..b683c33 100644
          .reason = reason,
          .vcpu_id = current->vcpu_id,
          .u.mov_to_cr.new_value = value,
-@@ -6438,29 +6438,29 @@ static void hvm_memory_event_cr(uint32_t reason, unsigned long value,
+@@ -6440,29 +6440,29 @@ static void hvm_memory_event_cr(uint32_t reason, unsigned long value,
  
  void hvm_memory_event_cr0(unsigned long value, unsigned long old) 
  {
@@ -1462,7 +1459,7 @@ index 6f4abcd..b683c33 100644
          .vcpu_id = current->vcpu_id,
          .u.mov_to_msr.msr = msr,
          .u.mov_to_msr.value = value,
-@@ -6474,8 +6474,8 @@ void hvm_memory_event_msr(unsigned long msr, unsigned long value)
+@@ -6476,8 +6476,8 @@ void hvm_memory_event_msr(unsigned long msr, unsigned long value)
  int hvm_memory_event_int3(unsigned long gla) 
  {
      uint32_t pfec = PFEC_page_present;
@@ -1473,7 +1470,7 @@ index 6f4abcd..b683c33 100644
          .vcpu_id = current->vcpu_id,
          .u.software_breakpoint.gfn = paging_gva_to_gfn(current, gla, &pfec)
      };
-@@ -6488,8 +6488,8 @@ int hvm_memory_event_int3(unsigned long gla)
+@@ -6490,8 +6490,8 @@ int hvm_memory_event_int3(unsigned long gla)
  int hvm_memory_event_single_step(unsigned long gla)
  {
      uint32_t pfec = PFEC_page_present;
@@ -1485,7 +1482,7 @@ index 6f4abcd..b683c33 100644
          .u.singlestep.gfn = paging_gva_to_gfn(current, gla, &pfec)
      };
 diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
-index 34de069..6db919a 100644
+index b68802e..ec8f608 100644
 --- a/xen/arch/x86/hvm/vmx/vmcs.c
 +++ b/xen/arch/x86/hvm/vmx/vmcs.c
 @@ -25,7 +25,7 @@
@@ -1683,7 +1680,7 @@ index e48b63a..654384a 100644
  #include <asm/page.h>
  #include <asm/paging.h>
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index 4d6d5bd..ed226f5 100644
+index 5ca7549..bb64b21 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -25,9 +25,9 @@
@@ -2181,10 +2178,10 @@ index 19be7d7..4bbe2f9 100644
  }
 diff --git a/xen/common/mem_event.c b/xen/common/mem_event.c
 deleted file mode 100644
-index f32f8ae..0000000
+index ae60c10..0000000
 --- a/xen/common/mem_event.c
 +++ /dev/null
-@@ -1,747 +0,0 @@
+@@ -1,746 +0,0 @@
 -/******************************************************************************
 - * mem_event.c
 - *
@@ -2268,8 +2265,7 @@ index f32f8ae..0000000
 -    med->blocked = 0;
 -
 -    /* Allocate event channel */
--    rc = alloc_unbound_xen_event_channel(d->vcpu[0],
--                                         current->domain->domain_id,
+-    rc = alloc_unbound_xen_event_channel(d, 0, current->domain->domain_id,
 -                                         notification_fn);
 -    if ( rc < 0 )
 -        goto err;
@@ -2408,7 +2404,7 @@ index f32f8ae..0000000
 -        }
 -
 -        /* Free domU's event channel and leave the other one unbound */
--        free_xen_event_channel(d->vcpu[0], med->xen_port);
+-        free_xen_event_channel(d, med->xen_port);
 -
 -        /* Unblock all vCPUs */
 -        for_each_vcpu ( d, v )
@@ -2934,10 +2930,10 @@ index f32f8ae..0000000
 - */
 diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
 new file mode 100644
-index 0000000..136225b
+index 0000000..c0474a9
 --- /dev/null
 +++ b/xen/common/vm_event.c
-@@ -0,0 +1,747 @@
+@@ -0,0 +1,746 @@
 +/******************************************************************************
 + * vm_event.c
 + *
@@ -3021,8 +3017,7 @@ index 0000000..136225b
 +    med->blocked = 0;
 +
 +    /* Allocate event channel */
-+    rc = alloc_unbound_xen_event_channel(d->vcpu[0],
-+                                         current->domain->domain_id,
++    rc = alloc_unbound_xen_event_channel(d, 0, current->domain->domain_id,
 +                                         notification_fn);
 +    if ( rc < 0 )
 +        goto err;
@@ -3161,7 +3156,7 @@ index 0000000..136225b
 +        }
 +
 +        /* Free domU's event channel and leave the other one unbound */
-+        free_xen_event_channel(d->vcpu[0], med->xen_port);
++        free_xen_event_channel(d, med->xen_port);
 +
 +        /* Unblock all vCPUs */
 +        for_each_vcpu ( d, v )
@@ -3667,7 +3662,7 @@ index 0000000..136225b
 +        if ( new < 0 )
 +        {
 +            printk(XENLOG_G_WARNING
-+                   "%pv mem_event: Too many unpause attempts\n", v);
++                   "%pv vm_event: Too many unpause attempts\n", v);
 +            return;
 +        }
 +
@@ -3721,7 +3716,7 @@ index 299ee06..23cf7d8 100644
      /* Not supported on ARM. */
  }
 diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
-index fd483c9..9cd06b0 100644
+index ba28e87..dfd3987 100644
 --- a/xen/include/asm-x86/domain.h
 +++ b/xen/include/asm-x86/domain.h
 @@ -478,13 +478,13 @@ struct arch_vcpu
@@ -4551,7 +4546,7 @@ index 29f3628..5da8a2d 100644
   *
   * The access permissions are soft state: when any ambiguous change of page
 diff --git a/xen/include/xen/sched.h b/xen/include/xen/sched.h
-index 1a1e0b8..431c020 100644
+index 1c97851..b9c04d7 100644
 --- a/xen/include/xen/sched.h
 +++ b/xen/include/xen/sched.h
 @@ -23,7 +23,7 @@
@@ -4563,7 +4558,7 @@ index 1a1e0b8..431c020 100644
  #include <public/event_channel.h>
  
  #ifdef CONFIG_COMPAT
-@@ -214,8 +214,8 @@ struct vcpu
+@@ -215,8 +215,8 @@ struct vcpu
      unsigned long    pause_flags;
      atomic_t         pause_count;
  
@@ -4574,7 +4569,7 @@ index 1a1e0b8..431c020 100644
      /* VCPU paused by system controller. */
      int              controller_pause_count;
  
-@@ -262,8 +262,8 @@ struct vcpu
+@@ -263,8 +263,8 @@ struct vcpu
  #define domain_unlock(d) spin_unlock_recursive(&(d)->domain_lock)
  #define domain_is_locked(d) spin_is_locked(&(d)->domain_lock)
  
@@ -4585,7 +4580,7 @@ index 1a1e0b8..431c020 100644
  {
      /* ring lock */
      spinlock_t ring_lock;
-@@ -274,10 +274,10 @@ struct mem_event_domain
+@@ -275,10 +275,10 @@ struct mem_event_domain
      void *ring_page;
      struct page_info *ring_pg_struct;
      /* front-end ring */
@@ -4598,7 +4593,7 @@ index 1a1e0b8..431c020 100644
      int pause_flag;
      /* list of vcpus waiting for room in the ring */
      struct waitqueue_head wq;
-@@ -287,14 +287,14 @@ struct mem_event_domain
+@@ -288,14 +288,14 @@ struct mem_event_domain
      unsigned int last_vcpu_wake_up;
  };
  
@@ -4617,7 +4612,7 @@ index 1a1e0b8..431c020 100644
  };
  
  struct evtchn_port_ops;
-@@ -449,8 +449,8 @@ struct domain
+@@ -451,8 +451,8 @@ struct domain
      /* Non-migratable and non-restoreable? */
      bool_t disable_migrate;
  
@@ -4912,5 +4907,5 @@ index 1da9f63..9da3275 100644
  #  source = the domain making the hypercall
  #  target = domain whose memory is being shared
 -- 
-2.4.5
+2.5.0
 

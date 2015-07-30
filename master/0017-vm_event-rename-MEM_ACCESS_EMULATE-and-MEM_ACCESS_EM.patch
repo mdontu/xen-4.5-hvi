@@ -1,0 +1,90 @@
+From 41836bab1c933de55350de252a8e57cf1832ad97 Mon Sep 17 00:00:00 2001
+From: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Date: Wed, 8 Jul 2015 17:28:42 +0200
+Subject: [PATCH 17/26] vm_event: rename MEM_ACCESS_EMULATE and
+ MEM_ACCESS_EMULATE_NOWRITE
+
+By naming, placing and bit shift convention, it could be taken as
+implied that MEM_ACCESS_EMULATE and MEM_ACCESS_EMULATE_NOWRITE are
+mem_access event specific flags (instead of being generally
+applicable as vm_event flags). This patch renames them to
+VM_EVENT_FLAG_EMULATE and VM_EVENT_FLAG_EMULATE_NOWRITE
+respectively, and uses bit shifts following the rest of the
+VM_EVENT_FLAG_ constants.
+
+Signed-off-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Acked-by: Tamas K Lengyel <tlengyel@novetta.com>
+---
+ xen/arch/x86/mm/p2m.c         |  4 ++--
+ xen/include/public/vm_event.h | 26 +++++++++++++-------------
+ 2 files changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index 8ec1222..c3d062c 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1378,7 +1378,7 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
+                                   const vm_event_response_t *rsp)
+ {
+     /* Mark vcpu for skipping one instruction upon rescheduling. */
+-    if ( rsp->flags & MEM_ACCESS_EMULATE )
++    if ( rsp->flags & VM_EVENT_FLAG_EMULATE )
+     {
+         xenmem_access_t access;
+         bool_t violation = 1;
+@@ -1513,7 +1513,7 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+     if ( v->arch.vm_event.emulate_flags )
+     {
+         hvm_mem_access_emulate_one((v->arch.vm_event.emulate_flags &
+-                                    MEM_ACCESS_EMULATE_NOWRITE) != 0,
++                                    VM_EVENT_FLAG_EMULATE_NOWRITE) != 0,
+                                    TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
+ 
+         v->arch.vm_event.emulate_flags = 0;
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index 577e971..aa22052 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -47,6 +47,19 @@
+ #define VM_EVENT_FLAG_VCPU_PAUSED     (1 << 0)
+ /* Flags to aid debugging mem_event */
+ #define VM_EVENT_FLAG_FOREIGN         (1 << 1)
++/*
++ * The following flags can be set in response to a mem_access event.
++ *
++ * Emulate the fault-causing instruction (if set in the event response flags).
++ * This will allow the guest to continue execution without lifting the page
++ * access restrictions.
++ */
++#define VM_EVENT_FLAG_EMULATE         (1 << 2)
++/*
++ * Same as MEM_ACCESS_EMULATE, but with write operations or operations
++ * potentially having side effects (like memory mapped or port I/O) disabled.
++ */
++#define VM_EVENT_FLAG_EMULATE_NOWRITE (1 << 3)
+ 
+ /*
+  * Reasons for the vm event request
+@@ -136,19 +149,6 @@ struct vm_event_regs_x86 {
+ #define MEM_ACCESS_GLA_VALID            (1 << 3)
+ #define MEM_ACCESS_FAULT_WITH_GLA       (1 << 4)
+ #define MEM_ACCESS_FAULT_IN_GPT         (1 << 5)
+-/*
+- * The following flags can be set in the response.
+- *
+- * Emulate the fault-causing instruction (if set in the event response flags).
+- * This will allow the guest to continue execution without lifting the page
+- * access restrictions.
+- */
+-#define MEM_ACCESS_EMULATE              (1 << 6)
+-/*
+- * Same as MEM_ACCESS_EMULATE, but with write operations or operations
+- * potentially having side effects (like memory mapped or port I/O) disabled.
+- */
+-#define MEM_ACCESS_EMULATE_NOWRITE      (1 << 7)
+ 
+ struct vm_event_mem_access {
+     uint64_t gfn;
+-- 
+2.5.0
+

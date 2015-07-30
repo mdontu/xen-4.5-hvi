@@ -1,7 +1,7 @@
-From fb97c9b62d3cfcbc3b5f19686612062d2f54ac27 Mon Sep 17 00:00:00 2001
+From bb2775da91aa6f461ea2029b03d0ceddcbca3c8b Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 9 Apr 2015 16:32:50 +0200
-Subject: [PATCH 10/22] xen/vm_event: Decouple vm_event and mem_access.
+Subject: [PATCH 10/26] xen/vm_event: Decouple vm_event and mem_access.
 
 The vm_event subsystem has been artifically tied to the presence of mem_access.
 While mem_access does depend on vm_event, vm_event is an entirely independent
@@ -87,7 +87,7 @@ index e6572af..4959407 100644
          break;
  
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index 9a48b21..b471e0d 100644
+index 1f9f2d1..8ec1222 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -1275,13 +1275,13 @@ int p2m_mem_paging_prep(struct domain *d, unsigned long gfn, uint64_t buffer)
@@ -277,10 +277,10 @@ index 7ed8a4e..511c8c5 100644
          }
          break;
 diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
-index 348fad2..6d40366 100644
+index d590c7d..cd6ace5 100644
 --- a/xen/common/vm_event.c
 +++ b/xen/common/vm_event.c
-@@ -358,6 +358,62 @@ int vm_event_get_response(struct domain *d, struct vm_event_domain *med, vm_even
+@@ -357,6 +357,62 @@ int vm_event_get_response(struct domain *d, struct vm_event_domain *med, vm_even
      return 1;
  }
  
@@ -343,7 +343,7 @@ index 348fad2..6d40366 100644
  void vm_event_cancel_slot(struct domain *d, struct vm_event_domain *med)
  {
      vm_event_ring_lock(med);
-@@ -437,25 +493,23 @@ int __vm_event_claim_slot(struct domain *d, struct vm_event_domain *med,
+@@ -436,25 +492,23 @@ int __vm_event_claim_slot(struct domain *d, struct vm_event_domain *med,
  static void mem_paging_notification(struct vcpu *v, unsigned int port)
  {
      if ( likely(v->domain->vm_event->paging.ring_page != NULL) )
@@ -373,7 +373,7 @@ index 348fad2..6d40366 100644
  }
  #endif
  
-@@ -510,13 +564,11 @@ void vm_event_cleanup(struct domain *d)
+@@ -509,13 +563,11 @@ void vm_event_cleanup(struct domain *d)
          (void)vm_event_disable(d, &d->vm_event->paging);
      }
  #endif
@@ -387,7 +387,7 @@ index 348fad2..6d40366 100644
  #ifdef HAS_MEM_SHARING
      if ( d->vm_event->share.ring_page )
      {
-@@ -611,7 +663,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -610,7 +662,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
      break;
  #endif
  
@@ -395,7 +395,7 @@ index 348fad2..6d40366 100644
      case XEN_DOMCTL_VM_EVENT_OP_MONITOR:
      {
          struct vm_event_domain *med = &d->vm_event->monitor;
-@@ -622,7 +673,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -621,7 +672,7 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
          case XEN_VM_EVENT_MONITOR_ENABLE:
              rc = vm_event_enable(d, mec, med, _VPF_mem_access,
                                      HVM_PARAM_MONITOR_RING_PFN,
@@ -404,7 +404,7 @@ index 348fad2..6d40366 100644
              break;
  
          case XEN_VM_EVENT_MONITOR_DISABLE:
-@@ -636,7 +687,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -635,7 +686,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
          }
      }
      break;
@@ -737,5 +737,5 @@ index 821b787..d76325e 100644
  #  source = the domain making the hypercall
  #  target = domain whose memory is being shared
 -- 
-2.4.5
+2.5.0
 

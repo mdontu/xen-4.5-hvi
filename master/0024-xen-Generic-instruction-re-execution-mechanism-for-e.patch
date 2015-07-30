@@ -1,7 +1,7 @@
-From 58691ec9d5287db25dac2db95ee9beb05bb45189 Mon Sep 17 00:00:00 2001
-From: Razvan Cojocaru <rcojocaru@bitdefender.com>
-Date: Tue, 27 Jan 2015 13:23:14 +0200
-Subject: [PATCH 21/22] xen: Generic instruction re-execution mechanism for
+From 81ab94c87037a3b526c40e27b65ef37c61af0d2d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+Date: Thu, 30 Jul 2015 10:21:01 +0300
+Subject: [PATCH 24/26] xen: Generic instruction re-execution mechanism for
  execute faults
 
 The Xen emulator is incapable of handling some instructions, which
@@ -19,17 +19,48 @@ flags inside page tables are two examples).
 
 Signed-off-by: Andrei Lutas <vlutas@bitdefender.com>
 ---
- xen/arch/x86/hvm/vmx/vmx.c   |  52 +++++++++++
- xen/arch/x86/mm/p2m.c        | 218 ++++++++++++++++++++++++++++++++++++++++++-
- xen/common/domain.c          |   2 +
- xen/include/asm-x86/domain.h |  19 ++++
- 4 files changed, 289 insertions(+), 2 deletions(-)
+ xen/arch/x86/hvm/vmx/vmx.c    |  68 +++++++++++++
+ xen/arch/x86/mm/p2m.c         | 220 +++++++++++++++++++++++++++++++++++++++++-
+ xen/common/domain.c           |   2 +
+ xen/include/asm-x86/domain.h  |  19 ++++
+ xen/include/asm-x86/hvm/hvm.h |   1 +
+ 5 files changed, 308 insertions(+), 2 deletions(-)
 
 diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
-index dc7a3f1..747efeb 100644
+index 59acdf5..61f4cf2 100644
 --- a/xen/arch/x86/hvm/vmx/vmx.c
 +++ b/xen/arch/x86/hvm/vmx/vmx.c
-@@ -2662,12 +2662,61 @@ void vmx_handle_EOI_induced_exit(struct vlapic *vlapic, int vector)
+@@ -1725,6 +1725,21 @@ static bool_t vmx_is_singlestep_supported(void)
+     return cpu_has_monitor_trap_flag;
+ }
+ 
++static bool_t vmx_exited_by_nested_pagefault(void)
++{
++    unsigned long exit_qualification, exit_reason;
++
++    __vmread(VM_EXIT_REASON, &exit_reason);
++    ASSERT(exit_reason == EXIT_REASON_EPT_VIOLATION);
++
++    __vmread(EXIT_QUALIFICATION, &exit_qualification);
++
++    if ( (exit_qualification & EPT_GLA_FAULT) == 0 )
++        return 0;
++
++    return 1;
++}
++
+ static struct hvm_function_table __initdata vmx_function_table = {
+     .name                 = "VMX",
+     .cpu_up_prepare       = vmx_cpu_up_prepare,
+@@ -1785,6 +1800,7 @@ static struct hvm_function_table __initdata vmx_function_table = {
+     .hypervisor_cpuid_leaf = vmx_hypervisor_cpuid_leaf,
+     .enable_msr_exit_interception = vmx_enable_msr_exit_interception,
+     .is_singlestep_supported = vmx_is_singlestep_supported,
++    .exited_by_nested_pagefault = vmx_exited_by_nested_pagefault
+ };
+ 
+ const struct hvm_function_table * __init start_vmx(void)
+@@ -2675,12 +2691,61 @@ void vmx_handle_EOI_induced_exit(struct vlapic *vlapic, int vector)
      vlapic_handle_EOI_induced_exit(vlapic, vector);
  }
  
@@ -91,7 +122,7 @@ index dc7a3f1..747efeb 100644
      __vmread(GUEST_RIP,    &regs->rip);
      __vmread(GUEST_RSP,    &regs->rsp);
      __vmread(GUEST_RFLAGS, &regs->rflags);
-@@ -3155,6 +3204,7 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
+@@ -3168,6 +3233,7 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
      case EXIT_REASON_MONITOR_TRAP_FLAG:
          v->arch.hvm_vmx.exec_control &= ~CPU_BASED_MONITOR_TRAP_FLAG;
          vmx_update_cpu_exec_control(v);
@@ -99,7 +130,7 @@ index dc7a3f1..747efeb 100644
          if ( v->arch.hvm_vcpu.single_step ) {
            hvm_event_single_step(regs->eip);
            if ( v->domain->debugger_attached )
-@@ -3247,6 +3297,8 @@ void vmx_vmenter_helper(const struct cpu_user_regs *regs)
+@@ -3260,6 +3326,8 @@ void vmx_vmenter_helper(const struct cpu_user_regs *regs)
          vpid_sync_all();
  
   out:
@@ -109,7 +140,7 @@ index dc7a3f1..747efeb 100644
  
      __vmwrite(GUEST_RIP,    regs->rip);
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index bd7c82c..266df20 100644
+index 87b71a0..3d25d9a 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -27,6 +27,7 @@
@@ -128,7 +159,7 @@ index bd7c82c..266df20 100644
  
  #include "mm-locks.h"
  
-@@ -1464,6 +1466,203 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
+@@ -1435,6 +1437,203 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
      }
  }
  
@@ -332,11 +363,13 @@ index bd7c82c..266df20 100644
  bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
                              struct npfec npfec,
                              vm_event_request_t **req_ptr)
-@@ -1531,6 +1730,16 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+@@ -1502,6 +1701,18 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
          }
      }
  
-+    if ( d->arch.mem_access_emulate_enabled ) /* don't send a mem_event */
++    if ( vm_event_check_ring(d->vm_event->monitor.ring_page) &&
++         hvm_funcs.exited_by_nested_pagefault &&
++         !hvm_funcs.exited_by_nested_pagefault() ) /* don't send a mem_event */
 +    {
 +        v->arch.vm_event.emulate_flags = 0;
 +        if ( gpa == 0 )
@@ -349,7 +382,7 @@ index bd7c82c..266df20 100644
      /* The previous vm_event reply does not match the current state. */
      if ( v->arch.vm_event.gpa != gpa || v->arch.vm_event.eip != eip )
      {
-@@ -1556,8 +1765,13 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+@@ -1528,8 +1739,13 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
              hvm_mem_access_emulate_one(EMUL_KIND_NOWRITE, TRAP_invalid_op,
                                         HVM_DELIVER_NO_ERROR_CODE);
          else
@@ -379,10 +412,10 @@ index 7ce3623..e7e9b9c 100644
  
      if ( (err = xsm_alloc_security_domain(d)) != 0 )
 diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
-index 26b3a85..4182aa5 100644
+index 90343fb..2ed7eef 100644
 --- a/xen/include/asm-x86/domain.h
 +++ b/xen/include/asm-x86/domain.h
-@@ -363,6 +363,7 @@ struct arch_domain
+@@ -362,6 +362,7 @@ struct arch_domain
      /* Mem_access emulation control */
      bool_t mem_access_emulate_enabled;
  
@@ -390,7 +423,7 @@ index 26b3a85..4182aa5 100644
      struct monitor_write_data *event_write_data;
  } __cacheline_aligned;
  
-@@ -520,6 +521,24 @@ struct arch_vcpu
+@@ -519,6 +520,24 @@ struct arch_vcpu
          unsigned long eip;
          struct vm_event_emul_read_data *emul_read_data;
      } vm_event;
@@ -415,6 +448,18 @@ index 26b3a85..4182aa5 100644
  } __cacheline_aligned;
  
  smap_check_policy_t smap_policy_change(struct vcpu *v,
+diff --git a/xen/include/asm-x86/hvm/hvm.h b/xen/include/asm-x86/hvm/hvm.h
+index e47efdf..0b5c966 100644
+--- a/xen/include/asm-x86/hvm/hvm.h
++++ b/xen/include/asm-x86/hvm/hvm.h
+@@ -208,6 +208,7 @@ struct hvm_function_table {
+ 
+     void (*enable_msr_exit_interception)(struct domain *d);
+     bool_t (*is_singlestep_supported)(void);
++    bool_t (*exited_by_nested_pagefault)(void);
+ };
+ 
+ extern struct hvm_function_table hvm_funcs;
 -- 
-2.4.5
+2.5.0
 

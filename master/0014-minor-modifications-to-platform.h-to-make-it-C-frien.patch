@@ -1,7 +1,7 @@
-From b04d3f863b6e69f7c35312521e81fb69c700f18c Mon Sep 17 00:00:00 2001
+From bd0c9b0a68927167ffb9a3fa5b3f09502b75802e Mon Sep 17 00:00:00 2001
 From: Razvan Cojocaru <rcojocaru@bitdefender.com>
 Date: Thu, 26 Feb 2015 13:57:34 +0100
-Subject: [PATCH 14/22] minor modifications to platform.h to make it
+Subject: [PATCH 14/26] minor modifications to platform.h to make it
  C++-friendly
 
 Moved the definition of struct xenpf_efi_guid and struct
@@ -80,5 +80,5 @@ index 229f109..b6d5e9c 100644
  
          struct {
 -- 
-2.4.5
+2.5.0
 

@@ -1,7 +1,7 @@
-From 902ab632e3a3f7f909edd344b3c4e3baea76b8b7 Mon Sep 17 00:00:00 2001
+From 3c02880dedf28effc18e3f800c2e05ebbbf4e5f2 Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 9 Apr 2015 16:32:51 +0200
-Subject: [PATCH 11/22] xen/vm_event: Relocate memop checks
+Subject: [PATCH 11/26] xen/vm_event: Relocate memop checks
 
 The memop handler function for paging/sharing responsible for calling XSM
 doesn't really have anything to do with vm_event, thus in this patch we
@@ -455,7 +455,7 @@ index 1e2bd1a..a99ee80 100644
      default:
          rc = -ENOSYS;
 diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
-index 6d40366..2211e90 100644
+index cd6ace5..331654d 100644
 --- a/xen/common/vm_event.c
 +++ b/xen/common/vm_event.c
 @@ -27,15 +27,6 @@
@@ -474,7 +474,7 @@ index 6d40366..2211e90 100644
  #include <xsm/xsm.h>
  
  /* for public/io/ring.h macros */
-@@ -513,40 +504,6 @@ static void mem_sharing_notification(struct vcpu *v, unsigned int port)
+@@ -512,40 +503,6 @@ static void mem_sharing_notification(struct vcpu *v, unsigned int port)
  }
  #endif
  
@@ -555,5 +555,5 @@ index 960beb2..51cbe8b 100644
                      XEN_GUEST_HANDLE_PARAM(void) u_domctl);
  
 -- 
-2.4.5
+2.5.0
 

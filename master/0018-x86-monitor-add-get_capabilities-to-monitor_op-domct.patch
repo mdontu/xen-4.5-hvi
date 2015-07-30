@@ -1,0 +1,238 @@
+From 2d46fc69f7b75f1e2a0e1c9b6fedbd687126e94e Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tlengyel@novetta.com>
+Date: Fri, 10 Jul 2015 12:38:09 +0200
+Subject: [PATCH 18/26] x86/monitor: add get_capabilities to monitor_op domctl
+
+Add option to monitor_op domctl to determine the monitor capabilities of the
+system.
+
+Signed-off-by: Tamas K Lengyel <tlengyel@novetta.com>
+Acked-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+---
+ tools/libxc/include/xenctrl.h |  6 ++++++
+ tools/libxc/xc_monitor.c      | 24 ++++++++++++++++++++++++
+ xen/arch/x86/hvm/vmx/vmx.c    |  6 ++++++
+ xen/arch/x86/monitor.c        | 31 +++++++++++++++++++++++++++++--
+ xen/common/domctl.c           |  2 ++
+ xen/include/asm-x86/hvm/hvm.h |  7 +++++++
+ xen/include/public/domctl.h   | 18 +++++++++++++++---
+ 7 files changed, 89 insertions(+), 5 deletions(-)
+
+diff --git a/tools/libxc/include/xenctrl.h b/tools/libxc/include/xenctrl.h
+index 05cb6ba..a4b9420 100644
+--- a/tools/libxc/include/xenctrl.h
++++ b/tools/libxc/include/xenctrl.h
+@@ -2364,6 +2364,12 @@ int xc_mem_access_disable_emulate(xc_interface *xch, domid_t domain_id);
+ void *xc_monitor_enable(xc_interface *xch, domid_t domain_id, uint32_t *port);
+ int xc_monitor_disable(xc_interface *xch, domid_t domain_id);
+ int xc_monitor_resume(xc_interface *xch, domid_t domain_id);
++/*
++ * Get a bitmap of supported monitor events in the form
++ * (1 << XEN_DOMCTL_MONITOR_EVENT_*).
++ */
++int xc_monitor_get_capabilities(xc_interface *xch, domid_t domain_id,
++                                uint32_t *capabilities);
+ int xc_monitor_write_ctrlreg(xc_interface *xch, domid_t domain_id,
+                              uint16_t index, bool enable, bool sync,
+                              bool onchangeonly);
+diff --git a/tools/libxc/xc_monitor.c b/tools/libxc/xc_monitor.c
+index 63013de..b64bce3 100644
+--- a/tools/libxc/xc_monitor.c
++++ b/tools/libxc/xc_monitor.c
+@@ -45,6 +45,30 @@ int xc_monitor_resume(xc_interface *xch, domid_t domain_id)
+                                NULL);
+ }
+ 
++int xc_monitor_get_capabilities(xc_interface *xch, domid_t domain_id,
++                                uint32_t *capabilities)
++{
++    int rc;
++    DECLARE_DOMCTL;
++
++    if ( !capabilities )
++    {
++        errno = EINVAL;
++        return -1;
++    }
++
++    domctl.cmd = XEN_DOMCTL_monitor_op;
++    domctl.domain = domain_id;
++    domctl.u.monitor_op.op = XEN_DOMCTL_MONITOR_OP_GET_CAPABILITIES;
++
++    rc = do_domctl(xch, &domctl);
++    if ( rc )
++        return rc;
++
++    *capabilities = domctl.u.monitor_op.event;
++    return 0;
++}
++
+ int xc_monitor_write_ctrlreg(xc_interface *xch, domid_t domain_id,
+                              uint16_t index, bool enable, bool sync,
+                              bool onchangeonly)
+diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
+index 991cbdd..1035306 100644
+--- a/xen/arch/x86/hvm/vmx/vmx.c
++++ b/xen/arch/x86/hvm/vmx/vmx.c
+@@ -1720,6 +1720,11 @@ static void vmx_enable_msr_exit_interception(struct domain *d)
+                                          MSR_TYPE_W);
+ }
+ 
++static bool_t vmx_is_singlestep_supported(void)
++{
++    return cpu_has_monitor_trap_flag;
++}
++
+ static struct hvm_function_table __initdata vmx_function_table = {
+     .name                 = "VMX",
+     .cpu_up_prepare       = vmx_cpu_up_prepare,
+@@ -1779,6 +1784,7 @@ static struct hvm_function_table __initdata vmx_function_table = {
+     .nhvm_hap_walk_L1_p2m = nvmx_hap_walk_L1_p2m,
+     .hypervisor_cpuid_leaf = vmx_hypervisor_cpuid_leaf,
+     .enable_msr_exit_interception = vmx_enable_msr_exit_interception,
++    .is_singlestep_supported = vmx_is_singlestep_supported,
+ };
+ 
+ const struct hvm_function_table * __init start_vmx(void)
+diff --git a/xen/arch/x86/monitor.c b/xen/arch/x86/monitor.c
+index 896acf7..79c490a 100644
+--- a/xen/arch/x86/monitor.c
++++ b/xen/arch/x86/monitor.c
+@@ -42,10 +42,29 @@ int status_check(struct xen_domctl_monitor_op *mop, bool_t status)
+     return 0;
+ }
+ 
++static inline uint32_t get_capabilities(struct domain *d)
++{
++    uint32_t capabilities = 0;
++
++    if ( !is_hvm_domain(d) || !cpu_has_vmx )
++        return capabilities;
++
++    capabilities = (1 << XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG) |
++                   (1 << XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR) |
++                   (1 << XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT);
++
++    /* Since we know this is on VMX, we can just call the hvm func */
++    if ( hvm_is_singlestep_supported() )
++        capabilities |= (1 << XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP);
++
++    return capabilities;
++}
++
+ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
+ {
+     int rc;
+     struct arch_domain *ad = &d->arch;
++    uint32_t capabilities = get_capabilities(d);
+ 
+     rc = xsm_vm_event_control(XSM_PRIV, d, mop->op, mop->event);
+     if ( rc )
+@@ -55,8 +74,12 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
+      * At the moment only Intel HVM domains are supported. However, event
+      * delivery could be extended to AMD and PV domains.
+      */
+-    if ( !is_hvm_domain(d) || !cpu_has_vmx )
+-        return -EOPNOTSUPP;
++
++    if ( mop->op == XEN_DOMCTL_MONITOR_OP_GET_CAPABILITIES )
++    {
++        mop->event = capabilities;
++        return 0;
++    }
+ 
+     /*
+      * Sanity check
+@@ -65,6 +88,10 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
+          mop->op != XEN_DOMCTL_MONITOR_OP_DISABLE )
+         return -EOPNOTSUPP;
+ 
++    /* Check if event type is available. */
++    if ( !(capabilities & (1 << mop->event)) )
++        return -EOPNOTSUPP;
++
+     switch ( mop->event )
+     {
+     case XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG:
+diff --git a/xen/common/domctl.c b/xen/common/domctl.c
+index e394ed6..f18d860 100644
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -1225,6 +1225,8 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+             break;
+ 
+         ret = monitor_domctl(d, &op->u.monitor_op);
++        if ( !ret )
++            copyback = 1;
+         break;
+ 
+     default:
+diff --git a/xen/include/asm-x86/hvm/hvm.h b/xen/include/asm-x86/hvm/hvm.h
+index c77076a..9301674 100644
+--- a/xen/include/asm-x86/hvm/hvm.h
++++ b/xen/include/asm-x86/hvm/hvm.h
+@@ -207,6 +207,7 @@ struct hvm_function_table {
+                                   uint32_t *ecx, uint32_t *edx);
+ 
+     void (*enable_msr_exit_interception)(struct domain *d);
++    bool_t (*is_singlestep_supported)(void);
+ };
+ 
+ extern struct hvm_function_table hvm_funcs;
+@@ -507,6 +508,12 @@ bool_t nhvm_vmcx_hap_enabled(struct vcpu *v);
+ /* interrupt */
+ enum hvm_intblk nhvm_interrupt_blocked(struct vcpu *v);
+ 
++static inline bool_t hvm_is_singlestep_supported(void)
++{
++    return (hvm_funcs.is_singlestep_supported &&
++            hvm_funcs.is_singlestep_supported());
++}
++ 
+ #ifndef NDEBUG
+ /* Permit use of the Forced Emulation Prefix in HVM guests */
+ extern bool_t opt_hvm_fep;
+diff --git a/xen/include/public/domctl.h b/xen/include/public/domctl.h
+index 95c7777..599a571 100644
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -1007,12 +1007,16 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_psr_cmt_op_t);
+  * via the ring buffer "MONITOR". The ring has to be first enabled
+  * with the domctl XEN_DOMCTL_VM_EVENT_OP_MONITOR.
+  *
++ * GET_CAPABILITIES can be used to determine which of these features is
++ * available on a given platform.
++ *
+  * NOTICE: mem_access events are also delivered via the "MONITOR" ring buffer;
+  * however, enabling/disabling those events is performed with the use of
+  * memory_op hypercalls!
+  */
+-#define XEN_DOMCTL_MONITOR_OP_ENABLE   0
+-#define XEN_DOMCTL_MONITOR_OP_DISABLE  1
++#define XEN_DOMCTL_MONITOR_OP_ENABLE            0
++#define XEN_DOMCTL_MONITOR_OP_DISABLE           1
++#define XEN_DOMCTL_MONITOR_OP_GET_CAPABILITIES  2
+ 
+ #define XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG         0
+ #define XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR            1
+@@ -1021,7 +1025,15 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_psr_cmt_op_t);
+ 
+ struct xen_domctl_monitor_op {
+     uint32_t op; /* XEN_DOMCTL_MONITOR_OP_* */
+-    uint32_t event; /* XEN_DOMCTL_MONITOR_EVENT_* */
++
++    /*
++     * When used with ENABLE/DISABLE this has to be set to
++     * the requested XEN_DOMCTL_MONITOR_EVENT_* value.
++     * With GET_CAPABILITIES this field returns a bitmap of
++     * events supported by the platform, in the format
++     * (1 << XEN_DOMCTL_MONITOR_EVENT_*).
++     */
++    uint32_t event;
+ 
+     /*
+      * Further options when issuing XEN_DOMCTL_MONITOR_OP_ENABLE.
+-- 
+2.5.0
+

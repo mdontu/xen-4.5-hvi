@@ -1,0 +1,659 @@
+From 0483689d1301d13e0a515c384b7466bc17bf8640 Mon Sep 17 00:00:00 2001
+From: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Date: Wed, 15 Jul 2015 16:08:03 +0200
+Subject: [PATCH 20/26] mem_access: support for memory-content hiding
+
+This patch adds support for memory-content hiding, by modifying the
+value returned by emulated instructions that read certain memory
+addresses that contain sensitive data. The patch only applies to
+cases where VM_FLAG_ACCESS_EMULATE has been set to a vm_event
+response.
+
+Signed-off-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Acked-by: Tamas K Lengyel <tlengyel@novetta.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+Acked-by: George Dunlap <george.dunlap@eu.citrix.com>
+Release-acked-by: Wei Liu <wei.liu2@citrix.com>
+---
+ tools/tests/xen-access/xen-access.c |   2 +-
+ xen/arch/x86/domain.c               |   3 +
+ xen/arch/x86/hvm/emulate.c          | 111 +++++++++++++++++++++++++++++++++---
+ xen/arch/x86/hvm/event.c            |  50 ++++++++--------
+ xen/arch/x86/mm/p2m.c               |  92 +++++++++++++++++-------------
+ xen/arch/x86/vm_event.c             |  35 ++++++++++++
+ xen/common/vm_event.c               |   8 +++
+ xen/include/asm-arm/vm_event.h      |  13 +++++
+ xen/include/asm-x86/domain.h        |   1 +
+ xen/include/asm-x86/hvm/emulate.h   |  10 +++-
+ xen/include/asm-x86/vm_event.h      |   4 ++
+ xen/include/public/vm_event.h       |  35 +++++++++---
+ 12 files changed, 281 insertions(+), 83 deletions(-)
+
+diff --git a/tools/tests/xen-access/xen-access.c b/tools/tests/xen-access/xen-access.c
+index 8a899da..38b686b 100644
+--- a/tools/tests/xen-access/xen-access.c
++++ b/tools/tests/xen-access/xen-access.c
+@@ -528,7 +528,7 @@ int main(int argc, char *argv[])
+                 break;
+             case VM_EVENT_REASON_SOFTWARE_BREAKPOINT:
+                 printf("Breakpoint: rip=%016"PRIx64", gfn=%"PRIx64" (vcpu %d)\n",
+-                       req.regs.x86.rip,
++                       req.data.regs.x86.rip,
+                        req.u.software_breakpoint.gfn,
+                        req.vcpu_id);
+ 
+diff --git a/xen/arch/x86/domain.c b/xen/arch/x86/domain.c
+index fea10cb..4908094 100644
+--- a/xen/arch/x86/domain.c
++++ b/xen/arch/x86/domain.c
+@@ -503,6 +503,9 @@ int vcpu_initialise(struct vcpu *v)
+ 
+ void vcpu_destroy(struct vcpu *v)
+ {
++    xfree(v->arch.vm_event.emul_read_data);
++    v->arch.vm_event.emul_read_data = NULL;
++
+     if ( is_pv_32on64_vcpu(v) )
+         release_compat_l4(v);
+ 
+diff --git a/xen/arch/x86/hvm/emulate.c b/xen/arch/x86/hvm/emulate.c
+index 1d5abb3..aecf85e 100644
+--- a/xen/arch/x86/hvm/emulate.c
++++ b/xen/arch/x86/hvm/emulate.c
+@@ -50,6 +50,23 @@ static void hvmtrace_io_assist(int is_mmio, ioreq_t *p)
+     trace_var(event, 0/*!cycles*/, size, buffer);
+ }
+ 
++static int set_context_data(void *buffer, unsigned int size)
++{
++    struct vcpu *curr = current;
++
++    if ( curr->arch.vm_event.emul_read_data )
++    {
++        unsigned int safe_size =
++            min(size, curr->arch.vm_event.emul_read_data->size);
++
++        memcpy(buffer, curr->arch.vm_event.emul_read_data->data, safe_size);
++        memset(buffer + safe_size, 0, size - safe_size);
++        return X86EMUL_OKAY;
++    }
++
++    return X86EMUL_UNHANDLEABLE;
++}
++
+ static int hvmemul_do_io(
+     int is_mmio, paddr_t addr, unsigned long *reps, int size,
+     paddr_t ram_gpa, int dir, int df, void *p_data)
+@@ -566,6 +583,12 @@ static int hvmemul_read(
+     unsigned int bytes,
+     struct x86_emulate_ctxt *ctxt)
+ {
++    struct hvm_emulate_ctxt *hvmemul_ctxt =
++        container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
++
++    if ( unlikely(hvmemul_ctxt->set_context) )
++        return set_context_data(p_data, bytes);
++
+     return __hvmemul_read(
+         seg, offset, p_data, bytes, hvm_access_read,
+         container_of(ctxt, struct hvm_emulate_ctxt, ctxt));
+@@ -804,6 +827,17 @@ static int hvmemul_cmpxchg(
+     unsigned int bytes,
+     struct x86_emulate_ctxt *ctxt)
+ {
++    struct hvm_emulate_ctxt *hvmemul_ctxt =
++        container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
++
++    if ( unlikely(hvmemul_ctxt->set_context) )
++    {
++        int rc = set_context_data(p_new, bytes);
++
++        if ( rc != X86EMUL_OKAY )
++            return rc;
++    }
++
+     /* Fix this in case the guest is really relying on r-m-w atomicity. */
+     return hvmemul_write(seg, offset, p_new, bytes, ctxt);
+ }
+@@ -846,6 +880,33 @@ static int hvmemul_rep_ins(
+                           !!(ctxt->regs->eflags & X86_EFLAGS_DF), NULL);
+ }
+ 
++static int hvmemul_rep_outs_set_context(
++    enum x86_segment src_seg,
++    unsigned long src_offset,
++    uint16_t dst_port,
++    unsigned int bytes_per_rep,
++    unsigned long *reps,
++    struct x86_emulate_ctxt *ctxt)
++{
++    unsigned int bytes = *reps * bytes_per_rep;
++    char *buf;
++    int rc;
++
++    buf = xmalloc_array(char, bytes);
++
++    if ( buf == NULL )
++        return X86EMUL_UNHANDLEABLE;
++
++    rc = set_context_data(buf, bytes);
++
++    if ( rc == X86EMUL_OKAY )
++        rc = hvmemul_do_pio(dst_port, reps, bytes, 0, IOREQ_WRITE, 0, buf);
++
++    xfree(buf);
++
++    return rc;
++}
++
+ static int hvmemul_rep_outs(
+     enum x86_segment src_seg,
+     unsigned long src_offset,
+@@ -862,6 +923,10 @@ static int hvmemul_rep_outs(
+     p2m_type_t p2mt;
+     int rc;
+ 
++    if ( unlikely(hvmemul_ctxt->set_context) )
++        return hvmemul_rep_outs_set_context(src_seg, src_offset, dst_port,
++                                            bytes_per_rep, reps, ctxt);
++
+     rc = hvmemul_virtual_to_linear(
+         src_seg, src_offset, bytes_per_rep, reps, hvm_access_read,
+         hvmemul_ctxt, &addr);
+@@ -968,11 +1033,26 @@ static int hvmemul_rep_movs(
+     if ( buf == NULL )
+         return X86EMUL_UNHANDLEABLE;
+ 
+-    /*
+-     * We do a modicum of checking here, just for paranoia's sake and to
+-     * definitely avoid copying an unitialised buffer into guest address space.
+-     */
+-    rc = hvm_copy_from_guest_phys(buf, sgpa, bytes);
++    if ( unlikely(hvmemul_ctxt->set_context) )
++    {
++        rc = set_context_data(buf, bytes);
++
++        if ( rc != X86EMUL_OKAY)
++        {
++            xfree(buf);
++            return rc;
++        }
++
++        rc = HVMCOPY_okay;
++    }
++    else
++        /*
++         * We do a modicum of checking here, just for paranoia's sake and to
++         * definitely avoid copying an unitialised buffer into guest address
++         * space.
++         */
++        rc = hvm_copy_from_guest_phys(buf, sgpa, bytes);
++
+     if ( rc == HVMCOPY_okay )
+         rc = hvm_copy_to_guest_phys(dgpa, buf, bytes);
+ 
+@@ -1133,8 +1213,15 @@ static int hvmemul_read_io(
+     unsigned long *val,
+     struct x86_emulate_ctxt *ctxt)
+ {
++    struct hvm_emulate_ctxt *hvmemul_ctxt =
++        container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
++
+     unsigned long reps = 1;
+     *val = 0;
++
++    if ( unlikely(hvmemul_ctxt->set_context) )
++        return set_context_data(val, bytes);
++
+     return hvmemul_do_pio(port, &reps, bytes, 0, IOREQ_READ, 0, val);
+ }
+ 
+@@ -1521,7 +1608,7 @@ int hvm_emulate_one_no_write(
+     return _hvm_emulate_one(hvmemul_ctxt, &hvm_emulate_ops_no_write);
+ }
+ 
+-void hvm_mem_access_emulate_one(bool_t nowrite, unsigned int trapnr,
++void hvm_mem_access_emulate_one(enum emul_kind kind, unsigned int trapnr,
+     unsigned int errcode)
+ {
+     struct hvm_emulate_ctxt ctx = {{ 0 }};
+@@ -1529,10 +1616,17 @@ void hvm_mem_access_emulate_one(bool_t nowrite, unsigned int trapnr,
+ 
+     hvm_emulate_prepare(&ctx, guest_cpu_user_regs());
+ 
+-    if ( nowrite )
++    switch ( kind )
++    {
++    case EMUL_KIND_NOWRITE:
+         rc = hvm_emulate_one_no_write(&ctx);
+-    else
++        break;
++    case EMUL_KIND_SET_CONTEXT:
++        ctx.set_context = 1;
++        /* Intentional fall-through. */
++    default:
+         rc = hvm_emulate_one(&ctx);
++    }
+ 
+     switch ( rc )
+     {
+@@ -1566,6 +1660,7 @@ void hvm_emulate_prepare(
+     hvmemul_ctxt->ctxt.force_writeback = 1;
+     hvmemul_ctxt->seg_reg_accessed = 0;
+     hvmemul_ctxt->seg_reg_dirty = 0;
++    hvmemul_ctxt->set_context = 0;
+     hvmemul_get_seg_reg(x86_seg_cs, hvmemul_ctxt);
+     hvmemul_get_seg_reg(x86_seg_ss, hvmemul_ctxt);
+ }
+diff --git a/xen/arch/x86/hvm/event.c b/xen/arch/x86/hvm/event.c
+index 53b9ca4..5341937 100644
+--- a/xen/arch/x86/hvm/event.c
++++ b/xen/arch/x86/hvm/event.c
+@@ -30,31 +30,31 @@ static void hvm_event_fill_regs(vm_event_request_t *req)
+     const struct cpu_user_regs *regs = guest_cpu_user_regs();
+     const struct vcpu *curr = current;
+ 
+-    req->regs.x86.rax = regs->eax;
+-    req->regs.x86.rcx = regs->ecx;
+-    req->regs.x86.rdx = regs->edx;
+-    req->regs.x86.rbx = regs->ebx;
+-    req->regs.x86.rsp = regs->esp;
+-    req->regs.x86.rbp = regs->ebp;
+-    req->regs.x86.rsi = regs->esi;
+-    req->regs.x86.rdi = regs->edi;
+-
+-    req->regs.x86.r8  = regs->r8;
+-    req->regs.x86.r9  = regs->r9;
+-    req->regs.x86.r10 = regs->r10;
+-    req->regs.x86.r11 = regs->r11;
+-    req->regs.x86.r12 = regs->r12;
+-    req->regs.x86.r13 = regs->r13;
+-    req->regs.x86.r14 = regs->r14;
+-    req->regs.x86.r15 = regs->r15;
+-
+-    req->regs.x86.rflags = regs->eflags;
+-    req->regs.x86.rip    = regs->eip;
+-
+-    req->regs.x86.msr_efer = curr->arch.hvm_vcpu.guest_efer;
+-    req->regs.x86.cr0 = curr->arch.hvm_vcpu.guest_cr[0];
+-    req->regs.x86.cr3 = curr->arch.hvm_vcpu.guest_cr[3];
+-    req->regs.x86.cr4 = curr->arch.hvm_vcpu.guest_cr[4];
++    req->data.regs.x86.rax = regs->eax;
++    req->data.regs.x86.rcx = regs->ecx;
++    req->data.regs.x86.rdx = regs->edx;
++    req->data.regs.x86.rbx = regs->ebx;
++    req->data.regs.x86.rsp = regs->esp;
++    req->data.regs.x86.rbp = regs->ebp;
++    req->data.regs.x86.rsi = regs->esi;
++    req->data.regs.x86.rdi = regs->edi;
++
++    req->data.regs.x86.r8  = regs->r8;
++    req->data.regs.x86.r9  = regs->r9;
++    req->data.regs.x86.r10 = regs->r10;
++    req->data.regs.x86.r11 = regs->r11;
++    req->data.regs.x86.r12 = regs->r12;
++    req->data.regs.x86.r13 = regs->r13;
++    req->data.regs.x86.r14 = regs->r14;
++    req->data.regs.x86.r15 = regs->r15;
++
++    req->data.regs.x86.rflags = regs->eflags;
++    req->data.regs.x86.rip    = regs->eip;
++
++    req->data.regs.x86.msr_efer = curr->arch.hvm_vcpu.guest_efer;
++    req->data.regs.x86.cr0 = curr->arch.hvm_vcpu.guest_cr[0];
++    req->data.regs.x86.cr3 = curr->arch.hvm_vcpu.guest_cr[3];
++    req->data.regs.x86.cr4 = curr->arch.hvm_vcpu.guest_cr[4];
+ }
+ 
+ static int hvm_event_traps(uint8_t sync, vm_event_request_t *req)
+diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
+index c3d062c..46e3ed1 100644
+--- a/xen/arch/x86/mm/p2m.c
++++ b/xen/arch/x86/mm/p2m.c
+@@ -1329,49 +1329,49 @@ static void p2m_vm_event_fill_regs(vm_event_request_t *req)
+     /* Architecture-specific vmcs/vmcb bits */
+     hvm_funcs.save_cpu_ctxt(curr, &ctxt);
+ 
+-    req->regs.x86.rax = regs->eax;
+-    req->regs.x86.rcx = regs->ecx;
+-    req->regs.x86.rdx = regs->edx;
+-    req->regs.x86.rbx = regs->ebx;
+-    req->regs.x86.rsp = regs->esp;
+-    req->regs.x86.rbp = regs->ebp;
+-    req->regs.x86.rsi = regs->esi;
+-    req->regs.x86.rdi = regs->edi;
+-
+-    req->regs.x86.r8  = regs->r8;
+-    req->regs.x86.r9  = regs->r9;
+-    req->regs.x86.r10 = regs->r10;
+-    req->regs.x86.r11 = regs->r11;
+-    req->regs.x86.r12 = regs->r12;
+-    req->regs.x86.r13 = regs->r13;
+-    req->regs.x86.r14 = regs->r14;
+-    req->regs.x86.r15 = regs->r15;
+-
+-    req->regs.x86.rflags = regs->eflags;
+-    req->regs.x86.rip    = regs->eip;
+-
+-    req->regs.x86.dr7 = curr->arch.debugreg[7];
+-    req->regs.x86.cr0 = ctxt.cr0;
+-    req->regs.x86.cr2 = ctxt.cr2;
+-    req->regs.x86.cr3 = ctxt.cr3;
+-    req->regs.x86.cr4 = ctxt.cr4;
+-
+-    req->regs.x86.sysenter_cs = ctxt.sysenter_cs;
+-    req->regs.x86.sysenter_esp = ctxt.sysenter_esp;
+-    req->regs.x86.sysenter_eip = ctxt.sysenter_eip;
+-
+-    req->regs.x86.msr_efer = ctxt.msr_efer;
+-    req->regs.x86.msr_star = ctxt.msr_star;
+-    req->regs.x86.msr_lstar = ctxt.msr_lstar;
++    req->data.regs.x86.rax = regs->eax;
++    req->data.regs.x86.rcx = regs->ecx;
++    req->data.regs.x86.rdx = regs->edx;
++    req->data.regs.x86.rbx = regs->ebx;
++    req->data.regs.x86.rsp = regs->esp;
++    req->data.regs.x86.rbp = regs->ebp;
++    req->data.regs.x86.rsi = regs->esi;
++    req->data.regs.x86.rdi = regs->edi;
++
++    req->data.regs.x86.r8  = regs->r8;
++    req->data.regs.x86.r9  = regs->r9;
++    req->data.regs.x86.r10 = regs->r10;
++    req->data.regs.x86.r11 = regs->r11;
++    req->data.regs.x86.r12 = regs->r12;
++    req->data.regs.x86.r13 = regs->r13;
++    req->data.regs.x86.r14 = regs->r14;
++    req->data.regs.x86.r15 = regs->r15;
++
++    req->data.regs.x86.rflags = regs->eflags;
++    req->data.regs.x86.rip    = regs->eip;
++
++    req->data.regs.x86.dr7 = curr->arch.debugreg[7];
++    req->data.regs.x86.cr0 = ctxt.cr0;
++    req->data.regs.x86.cr2 = ctxt.cr2;
++    req->data.regs.x86.cr3 = ctxt.cr3;
++    req->data.regs.x86.cr4 = ctxt.cr4;
++
++    req->data.regs.x86.sysenter_cs = ctxt.sysenter_cs;
++    req->data.regs.x86.sysenter_esp = ctxt.sysenter_esp;
++    req->data.regs.x86.sysenter_eip = ctxt.sysenter_eip;
++
++    req->data.regs.x86.msr_efer = ctxt.msr_efer;
++    req->data.regs.x86.msr_star = ctxt.msr_star;
++    req->data.regs.x86.msr_lstar = ctxt.msr_lstar;
+ 
+     hvm_get_segment_register(curr, x86_seg_fs, &seg);
+-    req->regs.x86.fs_base = seg.base;
++    req->data.regs.x86.fs_base = seg.base;
+ 
+     hvm_get_segment_register(curr, x86_seg_gs, &seg);
+-    req->regs.x86.gs_base = seg.base;
++    req->data.regs.x86.gs_base = seg.base;
+ 
+     hvm_get_segment_register(curr, x86_seg_cs, &seg);
+-    req->regs.x86.cs_arbytes = seg.attr.bytes;
++    req->data.regs.x86.cs_arbytes = seg.attr.bytes;
+ }
+ 
+ void p2m_mem_access_emulate_check(struct vcpu *v,
+@@ -1426,6 +1426,10 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
+         }
+ 
+         v->arch.vm_event.emulate_flags = violation ? rsp->flags : 0;
++
++        if ( (rsp->flags & VM_EVENT_FLAG_SET_EMUL_READ_DATA) &&
++             v->arch.vm_event.emul_read_data )
++            *v->arch.vm_event.emul_read_data = rsp->data.emul_read_data;
+     }
+ }
+ 
+@@ -1512,9 +1516,17 @@ bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+ 
+     if ( v->arch.vm_event.emulate_flags )
+     {
+-        hvm_mem_access_emulate_one((v->arch.vm_event.emulate_flags &
+-                                    VM_EVENT_FLAG_EMULATE_NOWRITE) != 0,
+-                                   TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
++        enum emul_kind kind = EMUL_KIND_NORMAL;
++
++        if ( v->arch.vm_event.emulate_flags &
++             VM_EVENT_FLAG_SET_EMUL_READ_DATA )
++            kind = EMUL_KIND_SET_CONTEXT;
++        else if ( v->arch.vm_event.emulate_flags &
++                  VM_EVENT_FLAG_EMULATE_NOWRITE )
++            kind = EMUL_KIND_NOWRITE;
++
++        hvm_mem_access_emulate_one(kind, TRAP_invalid_op,
++                                   HVM_DELIVER_NO_ERROR_CODE);
+ 
+         v->arch.vm_event.emulate_flags = 0;
+         return 1;
+diff --git a/xen/arch/x86/vm_event.c b/xen/arch/x86/vm_event.c
+index c390225..ec856fb 100644
+--- a/xen/arch/x86/vm_event.c
++++ b/xen/arch/x86/vm_event.c
+@@ -23,6 +23,41 @@
+ #include <xen/sched.h>
+ #include <asm/hvm/hvm.h>
+ 
++/* Implicitly serialized by the domctl lock. */
++int vm_event_init_domain(struct domain *d)
++{
++    struct vcpu *v;
++
++    for_each_vcpu ( d, v )
++    {
++        if ( v->arch.vm_event.emul_read_data )
++            continue;
++
++        v->arch.vm_event.emul_read_data =
++            xzalloc(struct vm_event_emul_read_data);
++
++        if ( !v->arch.vm_event.emul_read_data )
++            return -ENOMEM;
++    }
++
++    return 0;
++}
++
++/*
++ * Implicitly serialized by the domctl lock,
++ * or on domain cleanup paths only.
++ */
++void vm_event_cleanup_domain(struct domain *d)
++{
++    struct vcpu *v;
++
++    for_each_vcpu ( d, v )
++    {
++        xfree(v->arch.vm_event.emul_read_data);
++        v->arch.vm_event.emul_read_data = NULL;
++    }
++}
++
+ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
+ {
+     if ( !is_hvm_domain(d) || !atomic_read(&v->vm_event_pause_count) )
+diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
+index 7af6427..d9b8bfb 100644
+--- a/xen/common/vm_event.c
++++ b/xen/common/vm_event.c
+@@ -64,6 +64,11 @@ static int vm_event_enable(
+     vm_event_ring_lock_init(med);
+     vm_event_ring_lock(med);
+ 
++    rc = vm_event_init_domain(d);
++
++    if ( rc < 0 )
++        goto err;
++
+     rc = prepare_ring_for_helper(d, ring_gfn, &med->ring_pg_struct,
+                                     &med->ring_page);
+     if ( rc < 0 )
+@@ -226,6 +231,9 @@ static int vm_event_disable(struct domain *d, struct vm_event_domain *med)
+ 
+         destroy_ring_for_helper(&med->ring_page,
+                                 med->ring_pg_struct);
++
++        vm_event_cleanup_domain(d);
++
+         vm_event_ring_unlock(med);
+     }
+ 
+diff --git a/xen/include/asm-arm/vm_event.h b/xen/include/asm-arm/vm_event.h
+index a517495..20469a8 100644
+--- a/xen/include/asm-arm/vm_event.h
++++ b/xen/include/asm-arm/vm_event.h
+@@ -23,6 +23,19 @@
+ #include <xen/sched.h>
+ 
+ static inline
++int vm_event_init_domain(struct domain *d)
++{
++    /* Not supported on ARM. */
++    return 0;
++}
++
++static inline
++void vm_event_cleanup_domain(struct domain *d)
++{
++    /* Not supported on ARM. */
++}
++
++static inline
+ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
+ {
+     /* Not supported on ARM. */
+diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
+index aa25ebe..c5a8704 100644
+--- a/xen/include/asm-x86/domain.h
++++ b/xen/include/asm-x86/domain.h
+@@ -498,6 +498,7 @@ struct arch_vcpu
+         uint32_t emulate_flags;
+         unsigned long gpa;
+         unsigned long eip;
++        struct vm_event_emul_read_data *emul_read_data;
+     } vm_event;
+ 
+ } __cacheline_aligned;
+diff --git a/xen/include/asm-x86/hvm/emulate.h b/xen/include/asm-x86/hvm/emulate.h
+index b3971c8..0d2aa23 100644
+--- a/xen/include/asm-x86/hvm/emulate.h
++++ b/xen/include/asm-x86/hvm/emulate.h
+@@ -32,13 +32,21 @@ struct hvm_emulate_ctxt {
+     struct hvm_trap trap;
+ 
+     uint32_t intr_shadow;
++
++    bool_t set_context;
++};
++
++enum emul_kind {
++    EMUL_KIND_NORMAL,
++    EMUL_KIND_NOWRITE,
++    EMUL_KIND_SET_CONTEXT
+ };
+ 
+ int hvm_emulate_one(
+     struct hvm_emulate_ctxt *hvmemul_ctxt);
+ int hvm_emulate_one_no_write(
+     struct hvm_emulate_ctxt *hvmemul_ctxt);
+-void hvm_mem_access_emulate_one(bool_t nowrite,
++void hvm_mem_access_emulate_one(enum emul_kind kind,
+     unsigned int trapnr,
+     unsigned int errcode);
+ void hvm_emulate_prepare(
+diff --git a/xen/include/asm-x86/vm_event.h b/xen/include/asm-x86/vm_event.h
+index 7cc3a3d..3881783 100644
+--- a/xen/include/asm-x86/vm_event.h
++++ b/xen/include/asm-x86/vm_event.h
+@@ -22,6 +22,10 @@
+ 
+ #include <xen/sched.h>
+ 
++int vm_event_init_domain(struct domain *d);
++
++void vm_event_cleanup_domain(struct domain *d);
++
+ void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v);
+ 
+ #endif /* __ASM_X86_VM_EVENT_H__ */
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index c756c7c..4d89c38 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -44,9 +44,9 @@
+  *  paused
+  * VCPU_PAUSED in a response signals to unpause the vCPU
+  */
+-#define VM_EVENT_FLAG_VCPU_PAUSED       (1 << 0)
++#define VM_EVENT_FLAG_VCPU_PAUSED        (1 << 0)
+ /* Flags to aid debugging vm_event */
+-#define VM_EVENT_FLAG_FOREIGN           (1 << 1)
++#define VM_EVENT_FLAG_FOREIGN            (1 << 1)
+ /*
+  * The following flags can be set in response to a mem_access event.
+  *
+@@ -54,17 +54,26 @@
+  * This will allow the guest to continue execution without lifting the page
+  * access restrictions.
+  */
+-#define VM_EVENT_FLAG_EMULATE           (1 << 2)
++#define VM_EVENT_FLAG_EMULATE            (1 << 2)
+ /*
+- * Same as MEM_ACCESS_EMULATE, but with write operations or operations
++ * Same as VM_EVENT_FLAG_EMULATE, but with write operations or operations
+  * potentially having side effects (like memory mapped or port I/O) disabled.
+  */
+-#define VM_EVENT_FLAG_EMULATE_NOWRITE   (1 << 3)
++#define VM_EVENT_FLAG_EMULATE_NOWRITE    (1 << 3)
+ /*
+  * Toggle singlestepping on vm_event response.
+  * Requires the vCPU to be paused already (synchronous events only).
+  */
+-#define VM_EVENT_FLAG_TOGGLE_SINGLESTEP (1 << 4)
++#define VM_EVENT_FLAG_TOGGLE_SINGLESTEP  (1 << 4)
++/*
++ * Data is being sent back to the hypervisor in the event response, to be
++ * returned by the read function when emulating an instruction.
++ * This flag is only useful when combined with VM_EVENT_FLAG_EMULATE
++ * and takes precedence if combined with VM_EVENT_FLAG_EMULATE_NOWRITE
++ * (i.e. if both VM_EVENT_FLAG_EMULATE_NOWRITE and
++ * VM_EVENT_FLAG_SET_EMUL_READ_DATA are set, only the latter will be honored).
++ */
++#define VM_EVENT_FLAG_SET_EMUL_READ_DATA (1 << 5)
+ 
+ /*
+  * Reasons for the vm event request
+@@ -194,6 +203,12 @@ struct vm_event_sharing {
+     uint32_t _pad;
+ };
+ 
++struct vm_event_emul_read_data {
++    uint32_t size;
++    /* The struct is used in a union with vm_event_regs_x86. */
++    uint8_t  data[sizeof(struct vm_event_regs_x86) - sizeof(uint32_t)];
++};
++
+ typedef struct vm_event_st {
+     uint32_t version;   /* VM_EVENT_INTERFACE_VERSION */
+     uint32_t flags;     /* VM_EVENT_FLAG_* */
+@@ -211,8 +226,12 @@ typedef struct vm_event_st {
+     } u;
+ 
+     union {
+-        struct vm_event_regs_x86 x86;
+-    } regs;
++        union {
++            struct vm_event_regs_x86 x86;
++        } regs;
++
++        struct vm_event_emul_read_data emul_read_data;
++    } data;
+ } vm_event_request_t, vm_event_response_t;
+ 
+ DEFINE_RING_TYPES(vm_event, vm_event_request_t, vm_event_response_t);
+-- 
+2.5.0
+

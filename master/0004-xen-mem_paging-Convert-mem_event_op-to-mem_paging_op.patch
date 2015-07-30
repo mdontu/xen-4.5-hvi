@@ -1,7 +1,7 @@
-From 4e4a28424e89329b5b83c8d7c4d8e4ff32f0756a Mon Sep 17 00:00:00 2001
+From 8f3d4187f81afb8d8016ad9ad057cb8fea8c7563 Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 26 Mar 2015 22:06:55 +0100
-Subject: [PATCH 04/22] xen/mem_paging: Convert mem_event_op to mem_paging_op
+Subject: [PATCH 04/26] xen/mem_paging: Convert mem_event_op to mem_paging_op
  and cleanup
 
 The only use-case of the mem_event_op structure had been in mem_paging,
@@ -293,10 +293,10 @@ index d631aee..2fa1f67 100644
          break;
      }
 diff --git a/xen/common/mem_event.c b/xen/common/mem_event.c
-index 370ec81..f32f8ae 100644
+index b96d9fb..ae60c10 100644
 --- a/xen/common/mem_event.c
 +++ b/xen/common/mem_event.c
-@@ -476,12 +476,12 @@ int do_mem_event_op(int op, uint32_t domain, void *arg)
+@@ -475,12 +475,12 @@ int do_mem_event_op(int op, uint32_t domain, void *arg)
      {
  #ifdef HAS_MEM_PAGING
          case XENMEM_paging_op:
@@ -357,5 +357,5 @@ index 5b1311d..868ecaa 100644
  #define XENMEM_access_op                    21
  #define XENMEM_access_op_resume             0
 -- 
-2.4.5
+2.5.0
 

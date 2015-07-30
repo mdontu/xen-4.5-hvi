@@ -1,7 +1,7 @@
-From 4f7bff51a48f0e53e0842a427219e58751923503 Mon Sep 17 00:00:00 2001
+From 5caddf3dd89608d23ae60c2ecdd7402bab41828e Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 9 Apr 2015 16:32:49 +0200
-Subject: [PATCH 09/22] xen/vm_event: Deprecate VM_EVENT_FLAG_DUMMY flag
+Subject: [PATCH 09/26] xen/vm_event: Deprecate VM_EVENT_FLAG_DUMMY flag
 
 There are no use-cases for this flag.
 
@@ -29,7 +29,7 @@ index 4e5477a..e6572af 100644
          if ( (rsp.vcpu_id >= d->max_vcpus) || !d->vcpu[rsp.vcpu_id] )
              continue;
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index 0b56d57..9a48b21 100644
+index 84cda81..1f9f2d1 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -1308,9 +1308,6 @@ void p2m_mem_paging_resume(struct domain *d)
@@ -69,5 +69,5 @@ index ed9105b..c7426de 100644
  /*
   * Reasons for the vm event request
 -- 
-2.4.5
+2.5.0
 

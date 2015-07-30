@@ -1,7 +1,7 @@
-From 600e6b17eeb9a9964e4b6e26849beaa0127f1166 Mon Sep 17 00:00:00 2001
+From 65074b29628ebad6f32574b41bf49ab2d0989dae Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 26 Mar 2015 22:06:58 +0100
-Subject: [PATCH 07/22] x86/hvm: factor out and rename vm_event related
+Subject: [PATCH 07/26] x86/hvm: factor out and rename vm_event related
  functions
 
 To avoid growing hvm.c these functions can be stored separately. Minor style
@@ -245,7 +245,7 @@ index 0000000..dfb0ab7
 + * End:
 + */
 diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index b683c33..13d520a 100644
+index e5879f9..eadd56d 100644
 --- a/xen/arch/x86/hvm/hvm.c
 +++ b/xen/arch/x86/hvm/hvm.c
 @@ -35,7 +35,6 @@
@@ -264,7 +264,7 @@ index b683c33..13d520a 100644
  #include <asm/mtrr.h>
  #include <asm/apic.h>
  #include <public/sched.h>
-@@ -3269,7 +3269,7 @@ int hvm_set_cr0(unsigned long value)
+@@ -3271,7 +3271,7 @@ int hvm_set_cr0(unsigned long value)
          hvm_funcs.handle_cd(v, value);
  
      hvm_update_cr(v, 0, value);
@@ -273,7 +273,7 @@ index b683c33..13d520a 100644
  
      if ( (value ^ old_value) & X86_CR0_PG ) {
          if ( !nestedhvm_vmswitch_in_progress(v) && nestedhvm_vcpu_in_guestmode(v) )
-@@ -3310,7 +3310,7 @@ int hvm_set_cr3(unsigned long value)
+@@ -3312,7 +3312,7 @@ int hvm_set_cr3(unsigned long value)
      old=v->arch.hvm_vcpu.guest_cr[3];
      v->arch.hvm_vcpu.guest_cr[3] = value;
      paging_update_cr3(v);
@@ -282,7 +282,7 @@ index b683c33..13d520a 100644
      return X86EMUL_OKAY;
  
   bad_cr3:
-@@ -3351,7 +3351,7 @@ int hvm_set_cr4(unsigned long value)
+@@ -3353,7 +3353,7 @@ int hvm_set_cr4(unsigned long value)
      }
  
      hvm_update_cr(v, 4, value);
@@ -291,7 +291,7 @@ index b683c33..13d520a 100644
  
      /*
       * Modifying CR4.{PSE,PAE,PGE,SMEP}, or clearing CR4.PCIDE
-@@ -4520,7 +4520,7 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
+@@ -4522,7 +4522,7 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
      hvm_cpuid(1, NULL, NULL, NULL, &edx);
      mtrr = !!(edx & cpufeat_mask(X86_FEATURE_MTRR));
  
@@ -300,7 +300,7 @@ index b683c33..13d520a 100644
  
      switch ( msr )
      {
-@@ -6357,148 +6357,6 @@ int hvm_debug_op(struct vcpu *v, int32_t op)
+@@ -6359,148 +6359,6 @@ int hvm_debug_op(struct vcpu *v, int32_t op)
      return rc;
  }
  
@@ -557,5 +557,5 @@ index e3d2d9a..c77076a 100644
   * Nested HVM
   */
 -- 
-2.4.5
+2.5.0
 

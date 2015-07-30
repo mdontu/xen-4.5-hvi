@@ -1,0 +1,269 @@
+From 3db6051fecddb9236f1dad57d3a960cab1bd1af9 Mon Sep 17 00:00:00 2001
+From: Tamas K Lengyel <tlengyel@novetta.com>
+Date: Fri, 10 Jul 2015 14:04:21 +0200
+Subject: [PATCH 19/26] x86/vm_event: toggle singlestep from vm_event response
+
+Add an option to the vm_event response to toggle singlestepping on the vCPU.
+This is only supported on Intel CPUs which have Monitor Trap Flag capability.
+
+Signed-off-by: Tamas K Lengyel <tlengyel@novetta.com>
+Acked-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+Acked-by: Ian Campbell <Ian.campbell@citrix.com>
+---
+ MAINTAINERS                    |  1 +
+ xen/arch/x86/Makefile          |  1 +
+ xen/arch/x86/hvm/hvm.c         | 10 ++++++++++
+ xen/arch/x86/vm_event.c        | 41 +++++++++++++++++++++++++++++++++++++++++
+ xen/common/vm_event.c          |  7 ++++++-
+ xen/include/asm-arm/vm_event.h | 31 +++++++++++++++++++++++++++++++
+ xen/include/asm-x86/hvm/hvm.h  |  3 +++
+ xen/include/asm-x86/vm_event.h | 27 +++++++++++++++++++++++++++
+ xen/include/public/vm_event.h  | 15 ++++++++++-----
+ 9 files changed, 130 insertions(+), 6 deletions(-)
+ create mode 100644 xen/arch/x86/vm_event.c
+ create mode 100644 xen/include/asm-arm/vm_event.h
+ create mode 100644 xen/include/asm-x86/vm_event.h
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 8f47cae..251d331 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -372,6 +372,7 @@ F:	xen/common/vm_event.c
+ F:	xen/common/mem_access.c
+ F:	xen/arch/x86/hvm/event.c
+ F:	xen/arch/x86/monitor.c
++F:	xen/arch/x86/vm_event.c
+ 
+ XENTRACE
+ M:	George Dunlap <george.dunlap@eu.citrix.com>
+diff --git a/xen/arch/x86/Makefile b/xen/arch/x86/Makefile
+index a9ff27a..0f98f56 100644
+--- a/xen/arch/x86/Makefile
++++ b/xen/arch/x86/Makefile
+@@ -60,6 +60,7 @@ obj-y += machine_kexec.o
+ obj-y += crash.o
+ obj-y += tboot.o
+ obj-y += hpet.o
++obj-y += vm_event.o
+ obj-y += xstate.o
+ 
+ obj-$(crash_debug) += gdbstub.o
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index 9ebc64d..0f01cb5 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -6333,6 +6333,16 @@ int hvm_debug_op(struct vcpu *v, int32_t op)
+     return rc;
+ }
+ 
++void hvm_toggle_singlestep(struct vcpu *v)
++{
++    ASSERT(atomic_read(&v->pause_count));
++
++    if ( !hvm_is_singlestep_supported() )
++        return;
++
++    v->arch.hvm_vcpu.single_step = !v->arch.hvm_vcpu.single_step;
++}
++
+ int nhvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
+ {
+     if (hvm_funcs.nhvm_vcpu_hostrestore)
+diff --git a/xen/arch/x86/vm_event.c b/xen/arch/x86/vm_event.c
+new file mode 100644
+index 0000000..c390225
+--- /dev/null
++++ b/xen/arch/x86/vm_event.c
+@@ -0,0 +1,41 @@
++/*
++ * arch/x86/vm_event.c
++ *
++ * Architecture-specific vm_event handling routines
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public
++ * License v2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 021110-1307, USA.
++ */
++
++#include <xen/sched.h>
++#include <asm/hvm/hvm.h>
++
++void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
++{
++    if ( !is_hvm_domain(d) || !atomic_read(&v->vm_event_pause_count) )
++        return;
++
++    hvm_toggle_singlestep(v);
++}
++
++/*
++ * Local variables:
++ * mode: C
++ * c-file-style: "BSD"
++ * c-basic-offset: 4
++ * indent-tabs-mode: nil
++ * End:
++ */
+diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
+index c7ad476..7af6427 100644
+--- a/xen/common/vm_event.c
++++ b/xen/common/vm_event.c
+@@ -27,6 +27,7 @@
+ #include <xen/vm_event.h>
+ #include <xen/mem_access.h>
+ #include <asm/p2m.h>
++#include <asm/vm_event.h>
+ #include <xsm/xsm.h>
+ 
+ /* for public/io/ring.h macros */
+@@ -398,9 +399,13 @@ void vm_event_resume(struct domain *d, struct vm_event_domain *ved)
+ 
+         };
+ 
+-        /* Unpause domain. */
+         if ( rsp.flags & VM_EVENT_FLAG_VCPU_PAUSED )
++        {
++            if ( rsp.flags & VM_EVENT_FLAG_TOGGLE_SINGLESTEP )
++                vm_event_toggle_singlestep(d, v);
++
+             vm_event_vcpu_unpause(v);
++        }
+     }
+ }
+ 
+diff --git a/xen/include/asm-arm/vm_event.h b/xen/include/asm-arm/vm_event.h
+new file mode 100644
+index 0000000..a517495
+--- /dev/null
++++ b/xen/include/asm-arm/vm_event.h
+@@ -0,0 +1,31 @@
++/*
++ * vm_event.h: architecture specific vm_event handling routines
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ */
++
++#ifndef __ASM_ARM_VM_EVENT_H__
++#define __ASM_ARM_VM_EVENT_H__
++
++#include <xen/sched.h>
++
++static inline
++void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
++{
++    /* Not supported on ARM. */
++}
++
++#endif /* __ASM_ARM_VM_EVENT_H__ */
+diff --git a/xen/include/asm-x86/hvm/hvm.h b/xen/include/asm-x86/hvm/hvm.h
+index 9301674..e47efdf 100644
+--- a/xen/include/asm-x86/hvm/hvm.h
++++ b/xen/include/asm-x86/hvm/hvm.h
+@@ -447,6 +447,9 @@ static inline void hvm_set_info_guest(struct vcpu *v)
+ 
+ int hvm_debug_op(struct vcpu *v, int32_t op);
+ 
++/* Caller should pause vcpu before calling this function */
++void hvm_toggle_singlestep(struct vcpu *v);
++
+ static inline void hvm_invalidate_regs_fields(struct cpu_user_regs *regs)
+ {
+ #ifndef NDEBUG
+diff --git a/xen/include/asm-x86/vm_event.h b/xen/include/asm-x86/vm_event.h
+new file mode 100644
+index 0000000..7cc3a3d
+--- /dev/null
++++ b/xen/include/asm-x86/vm_event.h
+@@ -0,0 +1,27 @@
++/*
++ * vm_event.h: architecture specific vm_event handling routines
++ *
++ * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ */
++
++#ifndef __ASM_X86_VM_EVENT_H__
++#define __ASM_X86_VM_EVENT_H__
++
++#include <xen/sched.h>
++
++void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v);
++
++#endif /* __ASM_X86_VM_EVENT_H__ */
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index aa22052..c756c7c 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -44,9 +44,9 @@
+  *  paused
+  * VCPU_PAUSED in a response signals to unpause the vCPU
+  */
+-#define VM_EVENT_FLAG_VCPU_PAUSED     (1 << 0)
+-/* Flags to aid debugging mem_event */
+-#define VM_EVENT_FLAG_FOREIGN         (1 << 1)
++#define VM_EVENT_FLAG_VCPU_PAUSED       (1 << 0)
++/* Flags to aid debugging vm_event */
++#define VM_EVENT_FLAG_FOREIGN           (1 << 1)
+ /*
+  * The following flags can be set in response to a mem_access event.
+  *
+@@ -54,12 +54,17 @@
+  * This will allow the guest to continue execution without lifting the page
+  * access restrictions.
+  */
+-#define VM_EVENT_FLAG_EMULATE         (1 << 2)
++#define VM_EVENT_FLAG_EMULATE           (1 << 2)
+ /*
+  * Same as MEM_ACCESS_EMULATE, but with write operations or operations
+  * potentially having side effects (like memory mapped or port I/O) disabled.
+  */
+-#define VM_EVENT_FLAG_EMULATE_NOWRITE (1 << 3)
++#define VM_EVENT_FLAG_EMULATE_NOWRITE   (1 << 3)
++/*
++ * Toggle singlestepping on vm_event response.
++ * Requires the vCPU to be paused already (synchronous events only).
++ */
++#define VM_EVENT_FLAG_TOGGLE_SINGLESTEP (1 << 4)
+ 
+ /*
+  * Reasons for the vm event request
+-- 
+2.5.0
+

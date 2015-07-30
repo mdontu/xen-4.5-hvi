@@ -1,0 +1,130 @@
+From 233000a41d62b8e17514ee1fcfb9880f6457bd61 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mihai=20Don=C8=9Bu?= <mdontu@bitdefender.com>
+Date: Wed, 29 Jul 2015 21:15:58 +0300
+Subject: [PATCH 26/26] xen: Support for VMCALL mem_events
+
+Added support for VMCALL events (the memory introspection library
+will have the guest trigger VMCALLs, which will then be sent along
+via the mem_event mechanism).
+
+Signed-off-by: Razvan Cojocaru <rcojocaru@bitdefender.com>
+---
+ xen/arch/x86/hvm/event.c        | 11 +++++++++++
+ xen/arch/x86/hvm/hvm.c          |  5 +++++
+ xen/arch/x86/hvm/vmx/vmx.c      | 17 +++++++++++++++--
+ xen/include/asm-x86/hvm/event.h |  1 +
+ xen/include/asm-x86/hvm/hvm.h   |  2 ++
+ xen/include/public/vm_event.h   |  5 +++++
+ 6 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/xen/arch/x86/hvm/event.c b/xen/arch/x86/hvm/event.c
+index 042e583..787a103 100644
+--- a/xen/arch/x86/hvm/event.c
++++ b/xen/arch/x86/hvm/event.c
+@@ -179,6 +179,17 @@ int hvm_event_single_step(unsigned long gla)
+     return rc;
+ }
+ 
++void hvm_event_guest_VMCALL(void)
++{
++    struct vcpu *curr = current;
++    vm_event_request_t req = {
++        .reason = VM_EVENT_REASON_VMCALL,
++        .vcpu_id = curr->vcpu_id,
++    };
++
++    hvm_event_traps(1, &req);
++}
++
+ /*
+  * Local variables:
+  * mode: C
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index c36d719..579b723 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -6499,6 +6499,11 @@ enum hvm_intblk nhvm_interrupt_blocked(struct vcpu *v)
+     return hvm_funcs.nhvm_intr_blocked(v);
+ }
+ 
++void hvm_memory_event_vmcall(unsigned long rip, unsigned long eax)
++{
++    hvm_event_guest_VMCALL();
++}
++
+ /*
+  * Local variables:
+  * mode: C
+diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
+index 61f4cf2..564fd08 100644
+--- a/xen/arch/x86/hvm/vmx/vmx.c
++++ b/xen/arch/x86/hvm/vmx/vmx.c
+@@ -3054,9 +3054,22 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
+         break;
+     case EXIT_REASON_VMCALL:
+     {
+-        int rc;
++        int rc = 0;
++        unsigned long eax = regs->eax;
++
+         HVMTRACE_1D(VMMCALL, regs->eax);
+-        rc = hvm_do_hypercall(regs);
++
++        /* Don't send a VMCALL mem_event unless something
++         * caused the guests's eax register to contain the
++         * VMCALL_EVENT_REQUEST constant. */
++        if ( regs->eax != VMCALL_EVENT_REQUEST || !v->domain->vm_event->monitor.ring_page )
++            rc = hvm_do_hypercall(regs);
++        else
++        {
++            hvm_memory_event_vmcall(guest_cpu_user_regs()->eip, eax);
++            update_guest_eip();
++            break;
++        }
+         if ( rc != HVM_HCALL_preempted )
+         {
+             update_guest_eip(); /* Safe: VMCALL */
+diff --git a/xen/include/asm-x86/hvm/event.h b/xen/include/asm-x86/hvm/event.h
+index c082c20..4179bf8 100644
+--- a/xen/include/asm-x86/hvm/event.h
++++ b/xen/include/asm-x86/hvm/event.h
+@@ -32,6 +32,7 @@ void hvm_event_msr(unsigned int msr, uint64_t value);
+ int hvm_event_int3(unsigned long gla);
+ int hvm_event_single_step(unsigned long gla);
+ void hvm_event_guest_request(void);
++void hvm_event_guest_VMCALL(void);
+ 
+ #endif /* __ASM_X86_HVM_EVENT_H__ */
+ 
+diff --git a/xen/include/asm-x86/hvm/hvm.h b/xen/include/asm-x86/hvm/hvm.h
+index 0b5c966..4a3fea5 100644
+--- a/xen/include/asm-x86/hvm/hvm.h
++++ b/xen/include/asm-x86/hvm/hvm.h
+@@ -285,6 +285,8 @@ int hvm_girq_dest_2_vcpu_id(struct domain *d, uint8_t dest, uint8_t dest_mode);
+ enum hvm_intblk
+ hvm_interrupt_blocked(struct vcpu *v, struct hvm_intack intack);
+ 
++void hvm_memory_event_vmcall(unsigned long rip, unsigned long eax);
++
+ static inline int
+ hvm_guest_x86_mode(struct vcpu *v)
+ {
+diff --git a/xen/include/public/vm_event.h b/xen/include/public/vm_event.h
+index 4091b4e..b094c2b 100644
+--- a/xen/include/public/vm_event.h
++++ b/xen/include/public/vm_event.h
+@@ -107,6 +107,11 @@
+ #define VM_EVENT_REASON_SINGLESTEP              7
+ /* An event has been requested via HVMOP_guest_request_vm_event. */
+ #define VM_EVENT_REASON_GUEST_REQUEST           8
++/* A 'special' VMCALL was made */
++#define VM_EVENT_REASON_VMCALL                  9
++
++/* VMCALL mem_events will only be sent when the guest's EAX holds this value. */
++#define VMCALL_EVENT_REQUEST 0x494e5452 /* 'INTR' */
+ 
+ /* Supported values for the vm_event_write_ctrlreg index. */
+ #define VM_EVENT_X86_CR0    0
+-- 
+2.5.0
+

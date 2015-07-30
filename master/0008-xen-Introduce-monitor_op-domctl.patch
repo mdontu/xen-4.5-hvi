@@ -1,7 +1,7 @@
-From 9f4fff863c12c2e074aafc817000a56444183086 Mon Sep 17 00:00:00 2001
+From 607612d11456535fd02f60d3684642585b9553db Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 9 Apr 2015 16:32:48 +0200
-Subject: [PATCH 08/22] xen: Introduce monitor_op domctl
+Subject: [PATCH 08/26] xen: Introduce monitor_op domctl
 
 In preparation for allowing for introspecting ARM and PV domains the old
 control interface via the hvm_op hypercall is retired. A new control mechanism
@@ -653,10 +653,10 @@ index dfb0ab7..9d5f9f3 100644
  
  /*
 diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index 13d520a..999943b 100644
+index eadd56d..b3f28fb 100644
 --- a/xen/arch/x86/hvm/hvm.c
 +++ b/xen/arch/x86/hvm/hvm.c
-@@ -5789,19 +5789,11 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
+@@ -5791,19 +5791,11 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
              case HVM_PARAM_MEMORY_EVENT_CR0:
              case HVM_PARAM_MEMORY_EVENT_CR3:
              case HVM_PARAM_MEMORY_EVENT_CR4:
@@ -678,7 +678,7 @@ index 13d520a..999943b 100644
                  break;
              case HVM_PARAM_NESTEDHVM:
                  rc = xsm_hvm_param_nested(XSM_PRIV, d);
-@@ -5861,29 +5853,8 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
+@@ -5863,29 +5855,8 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
              }
              }
  
@@ -710,7 +710,7 @@ index 13d520a..999943b 100644
          else
          {
 diff --git a/xen/arch/x86/hvm/vmx/vmcs.c b/xen/arch/x86/hvm/vmx/vmcs.c
-index 6db919a..0068acc 100644
+index ec8f608..d9a1306 100644
 --- a/xen/arch/x86/hvm/vmx/vmcs.c
 +++ b/xen/arch/x86/hvm/vmx/vmcs.c
 @@ -714,7 +714,8 @@ void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
@@ -723,7 +723,7 @@ index 6db919a..0068acc 100644
           vm_event_check_ring(&d->vm_event->monitor) )
      {
          unsigned int i;
-@@ -1375,8 +1376,8 @@ void vmx_do_resume(struct vcpu *v)
+@@ -1379,8 +1380,8 @@ void vmx_do_resume(struct vcpu *v)
      }
  
      debug_state = v->domain->debugger_attached
@@ -748,7 +748,7 @@ index e10d0d8..6d710b9 100644
  
              vmx_update_cpu_exec_control(v);
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index ed226f5..0b56d57 100644
+index bb64b21..84cda81 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -1450,15 +1450,6 @@ void p2m_mem_access_emulate_check(struct vcpu *v,
@@ -1016,10 +1016,10 @@ index 4bbe2f9..f925ac7 100644
          rc = -ENOSYS;
          break;
 diff --git a/xen/common/vm_event.c b/xen/common/vm_event.c
-index 136225b..348fad2 100644
+index c0474a9..d590c7d 100644
 --- a/xen/common/vm_event.c
 +++ b/xen/common/vm_event.c
-@@ -599,11 +599,9 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -598,11 +598,9 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
          break;
  
          case XEN_VM_EVENT_PAGING_DISABLE:
@@ -1032,7 +1032,7 @@ index 136225b..348fad2 100644
  
          default:
              rc = -ENOSYS;
-@@ -622,32 +620,15 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -621,32 +619,15 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
          switch( mec->op )
          {
          case XEN_VM_EVENT_MONITOR_ENABLE:
@@ -1067,7 +1067,7 @@ index 136225b..348fad2 100644
  
          default:
              rc = -ENOSYS;
-@@ -666,7 +647,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -665,7 +646,6 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
          switch( mec->op )
          {
          case XEN_VM_EVENT_SHARING_ENABLE:
@@ -1075,7 +1075,7 @@ index 136225b..348fad2 100644
              rc = -EOPNOTSUPP;
              /* pvh fixme: p2m_is_foreign types need addressing */
              if ( is_pvh_vcpu(current) || is_pvh_domain(hardware_domain) )
-@@ -680,15 +660,12 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
+@@ -679,15 +659,12 @@ int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *mec,
              rc = vm_event_enable(d, mec, med, _VPF_mem_sharing,
                                      HVM_PARAM_SHARING_RING_PFN,
                                      mem_sharing_notification);
@@ -1169,7 +1169,7 @@ index 23cf7d8..11efb5b 100644
  
  #define p2m_is_foreign(_t)  ((_t) == p2m_map_foreign)
 diff --git a/xen/include/asm-x86/domain.h b/xen/include/asm-x86/domain.h
-index 9cd06b0..1b93f96 100644
+index dfd3987..13fc4a8 100644
 --- a/xen/include/asm-x86/domain.h
 +++ b/xen/include/asm-x86/domain.h
 @@ -330,6 +330,26 @@ struct arch_domain
@@ -1463,5 +1463,5 @@ index 9da3275..821b787 100644
  # XEN_DOMCTL_mem_sharing_op and XENMEM_sharing_op_{share,add_physmap} with:
  #  source = the domain making the hypercall
 -- 
-2.4.5
+2.5.0
 

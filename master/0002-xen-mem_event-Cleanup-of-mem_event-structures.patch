@@ -1,7 +1,7 @@
-From 960b3913e51a5d31cc9b8bacb7ba6086df262319 Mon Sep 17 00:00:00 2001
+From 9d824cfa2e8d99dd584d6e815a11da0d40c62748 Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 26 Mar 2015 22:06:53 +0100
-Subject: [PATCH 02/22] xen/mem_event: Cleanup of mem_event structures
+Subject: [PATCH 02/26] xen/mem_event: Cleanup of mem_event structures
 
 The public mem_event structures used to communicate with helper applications via
 shared rings have been used in different settings. However, the variable names
@@ -229,10 +229,10 @@ index 82c1ee4..a1a488b 100644
                      }
                  }
 diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
-index ddd2954..f973939 100644
+index 6adde19..9162828 100644
 --- a/xen/arch/x86/hvm/hvm.c
 +++ b/xen/arch/x86/hvm/hvm.c
-@@ -6362,48 +6362,42 @@ static void hvm_mem_event_fill_regs(mem_event_request_t *req)
+@@ -6364,48 +6364,42 @@ static void hvm_mem_event_fill_regs(mem_event_request_t *req)
      const struct cpu_user_regs *regs = guest_cpu_user_regs();
      const struct vcpu *curr = current;
  
@@ -313,7 +313,7 @@ index ddd2954..f973939 100644
      rc = mem_event_claim_slot(d, &d->mem_event->access);
      if ( rc == -ENOSYS )
      {
-@@ -6414,85 +6408,95 @@ static int hvm_memory_event_traps(long p, uint32_t reason,
+@@ -6416,85 +6410,95 @@ static int hvm_memory_event_traps(long p, uint32_t reason,
      else if ( rc < 0 )
          return rc;
  
@@ -492,7 +492,7 @@ index 7c0fc7d..8a192ef 100644
              continue;
  
 diff --git a/xen/arch/x86/mm/p2m.c b/xen/arch/x86/mm/p2m.c
-index efa49dd..0937994 100644
+index 6b9e806..3ea2f4a 100644
 --- a/xen/arch/x86/mm/p2m.c
 +++ b/xen/arch/x86/mm/p2m.c
 @@ -1077,7 +1077,10 @@ int p2m_mem_paging_evict(struct domain *d, unsigned long gfn)
@@ -805,10 +805,10 @@ index d8aac5f..9c5b7a6 100644
              continue;
  
 diff --git a/xen/common/mem_event.c b/xen/common/mem_event.c
-index 16ebdb5..cf6112e 100644
+index 7cfbe8e..8ab06ce 100644
 --- a/xen/common/mem_event.c
 +++ b/xen/common/mem_event.c
-@@ -292,6 +292,8 @@ void mem_event_put_request(struct domain *d,
+@@ -291,6 +291,8 @@ void mem_event_put_request(struct domain *d,
  #endif
      }
  
@@ -1026,5 +1026,5 @@ index 599f9e8..f2d6b41 100644
  /*
   * Local variables:
 -- 
-2.4.5
+2.5.0
 

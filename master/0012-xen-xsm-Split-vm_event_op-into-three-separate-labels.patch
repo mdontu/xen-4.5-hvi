@@ -1,7 +1,7 @@
-From 127b372c132ff48304686a941864bddcdbafaa8e Mon Sep 17 00:00:00 2001
+From 4ae9ae7e0bf737c0ffed3fb8b0cf27394a49fa4a Mon Sep 17 00:00:00 2001
 From: Tamas K Lengyel <tamas.lengyel@zentific.com>
 Date: Thu, 9 Apr 2015 16:32:52 +0200
-Subject: [PATCH 12/22] xen/xsm: Split vm_event_op into three separate labels
+Subject: [PATCH 12/26] xen/xsm: Split vm_event_op into three separate labels
 
 The XSM label vm_event_op has been used to control the three memops
 controlling mem_access, mem_paging and mem_sharing. While these systems
@@ -245,5 +245,5 @@ index d76325e..a4d73a4 100644
      configure_domain
  }
 -- 
-2.4.5
+2.5.0
 

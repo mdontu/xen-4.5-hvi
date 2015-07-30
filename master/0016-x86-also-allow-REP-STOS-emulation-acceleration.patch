@@ -1,7 +1,7 @@
-From 9fa81b17bd242490891b4185d82d17cd45b3774b Mon Sep 17 00:00:00 2001
+From bd7678f1e44e8e8f68c3af2334b540df266399a9 Mon Sep 17 00:00:00 2001
 From: Jan Beulich <jbeulich@suse.com>
 Date: Mon, 12 Jan 2015 15:40:06 +0100
-Subject: [PATCH 16/22] x86: also allow REP STOS emulation acceleration
+Subject: [PATCH 16/26] x86: also allow REP STOS emulation acceleration
 
 While the REP MOVS acceleration appears to have helped qemu-traditional
 based guests, qemu-upstream (or really the respective video BIOSes)
@@ -271,5 +271,5 @@ index b059341..bdce861 100644
       *  @reg:   [OUT] Contents of segment register (visible and hidden state).
       */
 -- 
-2.4.5
+2.5.0
 
